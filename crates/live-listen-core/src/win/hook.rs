@@ -117,6 +117,25 @@ enum Command {
     HoldInput,
     Release(bool),
     Record(bool),
+    Capture {
+        on: bool,
+        window: isize,
+        token: u64,
+        cancelled: Arc<AtomicBool>,
+        reply: mpsc::Sender<Result<CaptureReply, String>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureReply {
+    pub active: bool,
+    pub token: u64,
+}
+
+struct CaptureLease {
+    window: isize,
+    token: u64,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +181,8 @@ struct State {
     inject: Vec<Inject>,
     sink: HookSink,
     mouse: Option<HHOOK>,
+    capture: Option<CaptureLease>,
+    capture_token: u64,
 }
 
 thread_local! {
@@ -174,6 +195,7 @@ fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> Option<T> {
 
 impl State {
     fn on_key(&mut self, ev: KeyEvent) -> bool {
+        self.check_capture_owner(focus::foreground(), Instant::now());
         if self.mode == Mode::Buffering {
             if !ev.down && self.matcher.take_up(ev.vk) {
                 return true;
@@ -211,6 +233,7 @@ impl State {
     }
 
     fn on_mouse(&mut self, button: u8, down: bool, x: i32, y: i32) -> bool {
+        self.check_capture_owner(focus::foreground(), Instant::now());
         if self.mode == Mode::Buffering {
             if !down && self.matcher.take_mouse_up() {
                 return true;
@@ -280,6 +303,7 @@ impl State {
         match command {
             Command::Bindings(b) => b.apply(&mut self.matcher),
             Command::Begin(mode) => {
+                self.end_capture(Instant::now());
                 if self.mode == Mode::Buffering {
                     self.release(true);
                 }
@@ -300,24 +324,83 @@ impl State {
                 }
             }
             Command::Record(on) => {
-                if on && self.mode == Mode::Normal && !self.dictating {
+                if on && self.mode == Mode::Normal && !self.dictating && self.capture.is_none() {
                     self.set_mode(Mode::Recording);
                 } else if !on && self.mode == Mode::Recording {
                     self.set_mode(Mode::Normal);
                 }
             }
+            Command::Capture { on, window, token, cancelled, reply } => {
+                if on && cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let now = Instant::now();
+                let foreground = focus::foreground();
+                self.check_capture_owner(foreground, now);
+                let result =
+                    self.change_capture(on, window, token, focus::is_own(window).then_some(foreground), cancelled, now);
+                let started = result.as_ref().ok().filter(|r| on && r.active).map(|r| r.token);
+                if reply.send(result).is_err() && self.capture.as_ref().map(|c| c.token) == started && started.is_some()
+                {
+                    self.end_capture(now);
+                }
+            }
+        }
+    }
+
+    fn change_capture(
+        &mut self,
+        on: bool,
+        window: isize,
+        token: u64,
+        foreground: Option<isize>,
+        cancelled: Arc<AtomicBool>,
+        now: Instant,
+    ) -> Result<CaptureReply, String> {
+        if on {
+            if window == 0 || Some(window) != foreground {
+                return Err("capture_not_foreground".into());
+            }
+            if self.mode != Mode::Normal || self.dictating || self.matcher.holding() {
+                return Err("capture_busy".into());
+            }
+            self.capture_token = self.capture_token.wrapping_add(1).max(1);
+            self.capture = Some(CaptureLease { window, token: self.capture_token, cancelled });
+            let signals = self.matcher.begin_capture();
+            self.handle(signals);
+        } else if self.capture.as_ref().is_some_and(|lease| lease.token == token) {
+            self.end_capture(now);
+        }
+        Ok(CaptureReply {
+            active: self.capture.is_some(),
+            token: self.capture.as_ref().map_or(token, |lease| lease.token),
+        })
+    }
+
+    fn end_capture(&mut self, now: Instant) {
+        if self.capture.take().is_some() {
+            self.matcher.end_capture(now);
+        }
+    }
+
+    fn check_capture_owner(&mut self, foreground: isize, now: Instant) {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|lease| lease.window != foreground || lease.cancelled.load(Ordering::Acquire))
+        {
+            self.end_capture(now);
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
         let buffer = self.buffer_since.filter(|_| self.has_held_input()).map(|t| t + BUFFER_LIMIT);
-        match (self.matcher.next_deadline(), buffer) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let capture = self.capture.as_ref().map(|_| Instant::now() + Duration::from_millis(100));
+        [self.matcher.next_deadline(), buffer, capture].into_iter().flatten().min()
     }
 
     fn on_timer(&mut self, now: Instant) {
+        self.check_capture_owner(focus::foreground(), now);
         let signals = self.matcher.tick(now);
         if let Some(key) = self.matcher.take_release() {
             self.inject.push(Inject::ReleaseHeld(key));
@@ -336,6 +419,7 @@ impl State {
         self.dictating
             || matches!(self.mode, Mode::Continuous { .. } | Mode::Buffering)
             || self.matcher.next_deadline().is_some()
+            || self.matcher.watching_modifier_tap()
     }
 
     fn has_held_input(&self) -> bool {
@@ -344,6 +428,7 @@ impl State {
 
     /// Forgets held keys whose key-ups this hook cannot have seen; ends a running hold.
     fn reset_keys(&mut self) {
+        self.end_capture(Instant::now());
         let signals = self.matcher.reset_keys();
         self.handle(signals);
     }
@@ -483,7 +568,10 @@ unsafe extern "system" fn foreground_proc(
 ) {
     if event == EVENT_SYSTEM_FOREGROUND && object == OBJID_WINDOW.0 {
         let input_count = user_input_count();
-        with_state(|s| (s.sink)(HookEvent::Foreground { window: hwnd.0 as isize, input_count }));
+        with_state(|s| {
+            s.check_capture_owner(hwnd.0 as isize, Instant::now());
+            (s.sink)(HookEvent::Foreground { window: hwnd.0 as isize, input_count });
+        });
     }
 }
 
@@ -625,6 +713,21 @@ impl Hook {
     pub fn record(&self, on: bool) {
         self.post(Command::Record(on));
     }
+
+    /// Confirms suppression on the hook thread before the frontend accepts recording keys.
+    /// A cancelled/late start cannot leave a live capture behind after this call times out.
+    pub fn capture(&self, on: bool, window: isize, token: u64) -> Result<CaptureReply, String> {
+        let (reply, receive) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.post(Command::Capture { on, window, token, cancelled: Arc::clone(&cancelled), reply });
+        match receive.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(_) => {
+                cancelled.store(true, Ordering::Release);
+                Err("capture_unavailable".into())
+            }
+        }
+    }
 }
 
 impl Drop for Hook {
@@ -722,6 +825,8 @@ fn run(
             inject: Vec::new(),
             sink,
             mouse: None,
+            capture: None,
+            capture_token: 0,
         });
     });
     // SAFETY: GetCurrentThreadId has no preconditions.
@@ -828,7 +933,93 @@ mod tests {
             inject: Vec::new(),
             sink,
             mouse: None,
+            capture: None,
+            capture_token: 0,
         }
+    }
+
+    fn capture(s: &mut State, on: bool, token: u64, now: Instant) -> CaptureReply {
+        s.change_capture(on, 42, token, Some(42), Arc::new(AtomicBool::new(false)), now).unwrap()
+    }
+
+    #[test]
+    fn capture_rejects_busy_and_non_foreground_windows() {
+        let now = Instant::now();
+        let mut s = state(Box::new(|_| {}));
+        for (own, foreground) in [(false, 42), (true, 10)] {
+            assert_eq!(
+                s.change_capture(true, 42, 0, own.then_some(foreground), Arc::new(AtomicBool::new(false)), now),
+                Err("capture_not_foreground".into())
+            );
+            assert!(s.capture.is_none());
+        }
+        for mode in [Mode::Normal, Mode::Continuous { replay: false }, Mode::Buffering, Mode::Recording] {
+            s.mode = mode;
+            s.dictating = mode == Mode::Normal;
+            assert_eq!(
+                s.change_capture(true, 42, 0, Some(42), Arc::new(AtomicBool::new(false)), now),
+                Err("capture_busy".into())
+            );
+        }
+    }
+
+    #[test]
+    fn capture_tokens_make_late_stop_harmless() {
+        let now = Instant::now();
+        let mut s = state(Box::new(|_| {}));
+        let first = capture(&mut s, true, 0, now);
+        assert!(first.active);
+        assert!(!capture(&mut s, false, first.token, now).active);
+        let second = capture(&mut s, true, 0, now);
+        assert_ne!(first.token, second.token);
+        assert_eq!(capture(&mut s, false, first.token, now), second);
+        assert!(!capture(&mut s, false, second.token, now).active);
+        let third = capture(&mut s, true, 0, now);
+        let fourth = capture(&mut s, true, 0, now);
+        assert_ne!(third.token, fourth.token);
+        assert_eq!(capture(&mut s, false, third.token, now), fourth);
+    }
+
+    #[test]
+    fn capture_foreground_loss_does_not_resume_on_return() {
+        let now = Instant::now();
+        let mut s = state(Box::new(|_| {}));
+        s.matcher.set_more(Some(Binding::parse("RAlt").unwrap()), None);
+        let reply = capture(&mut s, true, 0, now);
+        assert_eq!(s.matcher.key(vk::RMENU, true, Mode::Normal, now), Default::default());
+        s.check_capture_owner(43, now);
+        assert!(s.capture.is_none());
+        s.check_capture_owner(42, now + Duration::from_secs(1));
+        assert!(s.capture.is_none());
+        assert_eq!(s.matcher.key(vk::RMENU, false, Mode::Normal, now + Duration::from_secs(1)), Default::default());
+        assert!(!capture(&mut s, false, reply.token, now).active);
+        assert!(s.inject.is_empty(), "capture never injects or swallows foreground input");
+    }
+
+    #[test]
+    fn timed_out_capture_request_cannot_leave_a_live_lease() {
+        let now = Instant::now();
+        let mut s = state(Box::new(|_| {}));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        s.change_capture(true, 42, 0, Some(42), Arc::clone(&cancelled), now).unwrap();
+        cancelled.store(true, Ordering::Release);
+        s.check_capture_owner(42, now);
+        assert!(s.capture.is_none());
+        let (reply, receive) = mpsc::channel();
+        s.apply(Command::Capture { on: true, window: 42, token: 0, cancelled, reply });
+        assert!(receive.try_recv().is_err());
+        assert!(s.capture.is_none());
+    }
+
+    #[test]
+    fn note_modifier_requests_mouse_tracking_until_cancelled() {
+        let mut s = state(Box::new(|_| {}));
+        s.matcher.set_more(Some(Binding::parse("RAlt").unwrap()), None);
+        assert!(!s.wants_mouse());
+        s.matcher.key(vk::RMENU, true, Mode::Normal, Instant::now());
+        assert!(s.wants_mouse());
+        s.matcher.mouse(1, true, 0, 0, true, Mode::Normal);
+        assert!(!s.wants_mouse());
     }
 
     #[test]

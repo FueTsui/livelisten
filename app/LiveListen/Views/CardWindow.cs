@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using LiveListen.Controls;
 using LiveListen.Services;
@@ -8,6 +9,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
+using static LiveListen.Interop.Win32;
 
 namespace LiveListen.Views;
 
@@ -27,26 +29,15 @@ internal sealed partial class CardWindow : Window
     private readonly Grid surfaceHost = new();
     private readonly StackPanel body = new() { Spacing = 4 };
     private readonly FontIcon kindIcon = new() { Glyph = "", FontSize = 14, VerticalAlignment = VerticalAlignment.Center };
-    private readonly CheckBox doneBox = new() { MinWidth = 0, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBlock date = new() { FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+    private readonly CardCheckBox doneBox = new();
+    private readonly TextBlock date = new() { FontSize = 12, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, IsHitTestVisible = false };
     private readonly Grid handle = new() { Background = new SolidColorBrush(Palette.Transparent), MinHeight = 28 };
     private readonly GlyphButton archive = new("", Loc.T("card.archive"), size: 26, iconSize: 12);
     private readonly GlyphButton hide = new("", Loc.T("card.hide"), size: 26, iconSize: 10);
-    private readonly TextBox editor = new()
-    {
-        AcceptsReturn = true,
-        TextWrapping = TextWrapping.Wrap,
-        BorderThickness = new Thickness(0),
-        Padding = new Thickness(0, 2, 0, 2),
-        MinHeight = 0,
-        MaxHeight = 320,
-        FontSize = 14,
-    };
-
-    // Brushes the text box template reads; their colors follow the card style.
-    private readonly SolidColorBrush clear = new(Palette.Transparent);
-    private readonly SolidColorBrush textBrush = new();
+    private readonly NoteEditor editor = new(requireContentPress: true);
     private readonly SolidColorBrush secondaryBrush = new();
+    private (string Text, string Rtf) loadedContent;
+    private (string? Text, string? Rtf) loadedSource;
 
     private SurfaceLook look;
     private JsonObject card;
@@ -67,24 +58,14 @@ internal sealed partial class CardWindow : Window
         Id = (ulong)card["id"].Num();
         Title = Loc.T("card.title");
 
-        foreach (var key in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused",
-                     "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" })
+        editor.Changed += OnEditorChanged;
+        editor.EditingEnded += SaveText;
+        Activated += (_, e) =>
         {
-            editor.Resources[key] = clear;
-        }
-        foreach (var key in new[] { "TextControlForeground", "TextControlForegroundPointerOver", "TextControlForegroundFocused" })
-        {
-            editor.Resources[key] = textBrush;
-        }
-        editor.Resources["TextControlPlaceholderForeground"] = secondaryBrush;
-        editor.Resources["TextControlPlaceholderForegroundFocused"] = secondaryBrush;
-        editor.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
-        editor.PlaceholderText = Loc.T("card.placeholder");
-        AutomationProperties.SetName(editor, Loc.T("card.text"));
-        editor.TextChanged += (_, _) => QueueFit();
-        editor.LostFocus += (_, _) => SaveText();
+            if (e.WindowActivationState == WindowActivationState.Deactivated && !editor.HasOpenFlyout) editor.FinishEditing();
+        };
 
-        var header = new Grid { ColumnSpacing = 6 };
+        var header = new Grid { ColumnSpacing = 6, Background = new SolidColorBrush(Palette.Transparent) };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -95,8 +76,8 @@ internal sealed partial class CardWindow : Window
         AutomationProperties.SetName(doneBox, Loc.T("card.done"));
         doneBox.Checked += (_, _) => Patch(new JsonObject { ["done"] = true });
         doneBox.Unchecked += (_, _) => Patch(new JsonObject { ["done"] = false });
-        handle.Children.Add(date);
         AutomationProperties.SetName(handle, Loc.T("bar.drag"));
+        handle.Children.Add(date);
         Grid.SetColumn(handle, 1);
         Grid.SetColumn(archive.View, 2);
         Grid.SetColumn(hide.View, 3);
@@ -104,38 +85,34 @@ internal sealed partial class CardWindow : Window
         header.Children.Add(handle);
         header.Children.Add(archive.View);
         header.Children.Add(hide.View);
+        void ShowHeaderActions(bool visible)
+        {
+            archive.View.Opacity = hide.View.Opacity = visible ? 1 : 0;
+            archive.View.IsHitTestVisible = hide.View.IsHitTestVisible = visible;
+        }
+        ShowHeaderActions(false);
+        header.PointerEntered += (_, _) => ShowHeaderActions(true);
+        header.PointerExited += (_, _) => ShowHeaderActions(false);
         ToolTipService.SetToolTip(archive.View, Loc.T("card.archive"));
         ToolTipService.SetToolTip(hide.View, Loc.T("card.hide"));
         archive.Click += () => Patch(new JsonObject { ["archived"] = true });
         hide.Click += () => Patch(new JsonObject { ["visible"] = false });
         _ = new WindowDrag(this, handle, SavePosition) { Snap = SnapTo };
-        var when = WhenPicker.Create(() => (long)card["createdMs"].Num(), () => root.ActualTheme,
-            ms => Patch(new JsonObject { ["createdMs"] = ms }));
-        handle.DoubleTapped += (_, e) =>
-        {
-            e.Handled = true;
-            when.ShowAt(date);
-        };
-        ToolTipService.SetToolTip(handle, Loc.T("card.date.tip"));
-        frame.ContextFlyout = CardMenu(when);
+        ToolTipService.SetToolTip(handle, Loc.T("card.header.tip"));
+        var headerMenu = CardMenu();
+        editor.TrackExternalFlyout(headerMenu);
+        header.ContextFlyout = handle.ContextFlyout = headerMenu;
 
         body.Children.Add(header);
-        body.Children.Add(editor);
+        body.Children.Add(editor.View);
         frame.Children.Add(surfaceHost);
         frame.Children.Add(body);
         root.Children.Add(frame);
         Content = root;
         surface = new Surface(surfaceHost);
         Overlay.Prepare(this, floating: false);
-        AppWindow.Closing += (_, e) =>
-        {
-            if (!app.Exiting && !closing)
-            {
-                // Alt+F4 hides the card from the desktop; it stays in the list.
-                e.Cancel = true;
-                Patch(new JsonObject { ["visible"] = false });
-            }
-        };
+        CardSmokeProbe.Attach(this, root, Id, () => editor.IsEditing);
+        AppWindow.Closing += OnClosing;
         var scale = Overlay.Scale(this);
         AppWindow.Resize(new SizeInt32((int)((CardWidth + 32) * scale), (int)(120 * scale)));
         Refresh();
@@ -145,6 +122,18 @@ internal sealed partial class CardWindow : Window
     }
 
     public ulong Id { get; }
+    public bool IsCardVisible => Overlay.IsVisible(this);
+    public bool IsEmptyDraft => !closing && IsCardVisible && editor.IsEmpty;
+    public bool HasOpenFlyout => editor.HasOpenFlyout;
+    public (string Text, string? Rtf) SavedText => (card["text"].Str(), card["rtf"]?.GetValue<string>());
+
+    private void OnClosing(AppWindow sender, AppWindowClosingEventArgs e)
+    {
+        if (app.Exiting || closing) return;
+        // Alt+F4 hides the card from the desktop; it stays in the list.
+        e.Cancel = true;
+        Patch(new JsonObject { ["visible"] = false });
+    }
 
     /// <summary>The drawn card in screen pixels, without the room for its shadow.</summary>
     public RectInt32 CardRect => Inset(AppWindow.Position);
@@ -189,16 +178,68 @@ internal sealed partial class CardWindow : Window
         QueueFit();
     }
 
-    public void CloseCard()
+    public void ShowExisting()
+    {
+        if (IsCardVisible) return;
+        Fit();
+        Overlay.ShowQuiet(this);
+    }
+
+    public void HideCard()
+    {
+        if (app.Cards.StopWatchingEmpty(this)) LoadText();
+        Overlay.Hide(this);
+    }
+
+    public void RestoreClearedText()
+    {
+        if (!closing && !editor.IsEditing && editor.IsEmpty) LoadText();
+    }
+
+    public void EditNewCard()
+    {
+        Overlay.BringToFront(this);
+        if (root.IsLoaded) editor.BeginEditing();
+        else root.Loaded += EditNewCardWhenLoaded;
+    }
+
+    private void EditNewCardWhenLoaded(object sender, RoutedEventArgs e)
+    {
+        root.Loaded -= EditNewCardWhenLoaded;
+        editor.BeginEditing();
+    }
+
+    public bool CloseCard()
+    {
+        editor.FinishEditing();
+        if (editor.IsEditing)
+        {
+            app.Bar.ShowMessage(Loc.Error("bad_rich_text"), true);
+            return false;
+        }
+        if (pendingFields.Count > 0 || !saves.IsCompleted) return false;
+        CloseWindow();
+        return true;
+    }
+
+    /// <summary>Closes an already-flushed card after its record has been deleted.</summary>
+    public void CloseAfterDeletion() => CloseWindow();
+
+    private void CloseWindow()
     {
         closing = true;
+        app.Cards.StopWatchingEmpty(this);
+        AppWindow.Closing -= OnClosing;
+        SystemBackdrop = null;
+        surface.ReleaseShadow();
+        Content = null;
         Close();
     }
 
     /// <summary>Commits the focused editor and drains patches before the engine can stop.</summary>
     public async Task<bool> FlushAsync()
     {
-        SaveText();
+        if (editor.IsEditing && !editor.CanSave) return false;
         PauseEditing();
         await saves;
         if (pendingFields.Count > 0)
@@ -211,18 +252,20 @@ internal sealed partial class CardWindow : Window
 
     public void PauseEditing()
     {
-        editor.IsReadOnly = true;
+        editor.Pause();
         root.IsHitTestVisible = false;
     }
 
     public void ResumeEditing()
     {
-        editor.IsReadOnly = false;
+        editor.Resume();
         root.IsHitTestVisible = true;
     }
 
     public void Update(JsonObject value)
     {
+        if (pendingFields.Count == 0 && (value["text"].Str(), value["rtf"].Str()) == loadedSource
+            && JsonNode.DeepEquals(card, value)) return;
         var oldStyle = card["style"];
         card = (JsonObject)value.DeepClone();
         // An earlier cards.changed event must not flash old values over local edits
@@ -241,18 +284,15 @@ internal sealed partial class CardWindow : Window
         kindIcon.Visibility = todo ? Visibility.Collapsed : Visibility.Visible;
         doneBox.Visibility = todo ? Visibility.Visible : Visibility.Collapsed;
         doneBox.IsChecked = done;
-        date.Text = Format.Date(card["created"].Str());
-        if (editor.FocusState == FocusState.Unfocused)
+        RefreshHeader();
+        if (!editor.IsEditing && (card["text"].Str(), card["rtf"].Str()) != loadedSource)
         {
-            editor.Text = card["text"].Str();
+            LoadText();
         }
-        editor.Opacity = done ? 0.55 : 1;
+        editor.View.Opacity = done ? 0.55 : 1;
         syncing = false;
         QueueFit();
     }
-
-    /// <summary>True when this card has a style of its own instead of the shared one.</summary>
-    public bool HasOwnStyle => app.Cards.EffectiveStyle(Id) is not null;
 
     /// <summary>Shows a style without saving it; <c>null</c> goes back to the saved one.</summary>
     public void PreviewStyle(JsonObject? style)
@@ -267,23 +307,38 @@ internal sealed partial class CardWindow : Window
     /// <summary>Re-reads the card style: its own one, or the shared one from the settings.</summary>
     public void Refresh()
     {
-        look = Theme.Look(app.Settings, "cards", previewStyle ?? app.Cards.EffectiveStyle(Id));
-        root.RequestedTheme = look.Dark ? ElementTheme.Dark : ElementTheme.Light;
-        frame.Margin = new Thickness(look.ShadowMargin);
-        surface.Apply(look);
-        body.Padding = new Thickness(Math.Max(8, look.Padding), Math.Max(4, look.Padding - 6), Math.Max(6, look.Padding - 4), Math.Max(8, look.Padding));
-        textBrush.Color = look.Text;
-        secondaryBrush.Color = look.Secondary;
-        editor.Foreground = textBrush;
-        date.Foreground = secondaryBrush;
-        kindIcon.Foreground = secondaryBrush;
-        archive.Apply(look);
-        hide.Apply(look);
+        var nextLook = Theme.Look(app.Settings, "cards", previewStyle ?? app.Cards.EffectiveStyle(Id));
+        if (nextLook != look)
+        {
+            look = nextLook;
+            root.RequestedTheme = look.Dark ? ElementTheme.Dark : ElementTheme.Light;
+            frame.Margin = new Thickness(look.ShadowMargin);
+            surface.Apply(look);
+            body.Padding = new Thickness(Math.Max(8, look.Padding), Math.Max(4, look.Padding - 6), Math.Max(6, look.Padding - 4), Math.Max(8, look.Padding));
+            secondaryBrush.Color = look.Secondary;
+            editor.Apply(look);
+            date.Foreground = secondaryBrush;
+            kindIcon.Foreground = secondaryBrush;
+            archive.Apply(look);
+            hide.Apply(look);
+        }
+        RefreshHeader();
         QueueFit();
     }
 
+    private void RefreshHeader()
+    {
+        var style = previewStyle ?? app.Cards.EffectiveStyle(Id) ?? app.Settings.Get("appearance.cards") as JsonObject;
+        var mode = CardHeaderInfo.Mode(style?["cardHeader"].Str());
+        date.Text = CardHeaderInfo.Render(card["created"].Str(), mode,
+            style?["cardHeaderDate"].Str(), style?["cardHeaderTitle"].Str(),
+            Loc.T(card["kind"].Str() == "todo" ? "cards.kind.todo" : "cards.kind.note"), Loc.English);
+        // Keep the handle's geometry and state/action buttons even without a title.
+        date.Visibility = mode == "none" ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     /// <summary>The right-click menu; it is rebuilt each time so it matches the card.</summary>
-    private MenuFlyout CardMenu(Flyout when)
+    private MenuFlyout CardMenu()
     {
         var menu = new MenuFlyout { ShouldConstrainToRootBounds = false };
         menu.Opening += (_, _) =>
@@ -297,48 +352,99 @@ internal sealed partial class CardWindow : Window
                 item.Click += (_, _) => dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () => run());
                 menu.Items.Add(item);
             }
+            Item(Loc.T("cards.new"), "\uE710", app.Cards.CreateDesktopCard);
+            menu.Items.Add(new MenuFlyoutSeparator());
             Item(Loc.T(todo ? "cards.toNote" : "cards.toTodo"), todo ? "\uE70B" : "\uE73A",
                 () => Patch(new JsonObject { ["kind"] = todo ? "note" : "todo" }));
-            Item(Loc.T("card.menu.date"), "\uE787", () => when.ShowAt(date));
             menu.Items.Add(new MenuFlyoutSeparator());
-            Item(Loc.T("card.archive"), "\uE7B8", () => Patch(new JsonObject { ["archived"] = true }));
             Item(Loc.T("card.hide"), "\uED1A", () => Patch(new JsonObject { ["visible"] = false }));
             menu.Items.Add(new MenuFlyoutSeparator());
-            Item(Loc.T("card.menu.style"), "\uE790", () => app.OpenCardStyle(Id));
-            if (HasOwnStyle)
+            var colors = new MenuFlyoutSubItem
             {
-                Item(Loc.T("card.menu.sharedStyle"), "\uE72C", () => _ = SetStyle(null));
+                Text = Loc.T("card.palette"),
+                Icon = new FontIcon { Glyph = "\uE790" },
+            };
+            var ownStyle = app.Cards.EffectiveStyle(Id);
+            var shared = new ToggleMenuFlyoutItem
+            {
+                Text = Loc.T("card.palette.default"),
+                IsChecked = ownStyle is null,
+            };
+            shared.Click += (_, _) => _ = SetStyle(null);
+            colors.Items.Add(shared);
+            colors.Items.Add(new MenuFlyoutSeparator());
+            foreach (var preset in CardPalette.All)
+            {
+                var item = new ToggleMenuFlyoutItem
+                {
+                    Text = Loc.T("card.palette." + preset.Key),
+                    IsChecked = preset.Matches(ownStyle),
+                    Icon = new FontIcon
+                    {
+                        Glyph = "\uEA3B",
+                        FontSize = 14,
+                        Foreground = new SolidColorBrush(Theme.Parse(preset.Border) ?? look.Secondary),
+                    },
+                };
+                item.Click += (_, _) =>
+                {
+                    var basis = app.Cards.EffectiveStyle(Id)
+                        ?? app.Settings.Get("appearance.cards") as JsonObject ?? new JsonObject();
+                    _ = SetStyle(preset.Apply(basis));
+                };
+                colors.Items.Add(item);
             }
+            menu.Items.Add(colors);
             Item(Loc.T("card.menu.settings"), "\uE713", () => app.OpenNotebook());
         };
         return menu;
     }
 
+    private void OnEditorChanged()
+    {
+        QueueFit();
+        if (!editor.IsEditing || closing) return;
+        if (editor.IsEmpty) app.Cards.WatchEmpty(this);
+        else app.Cards.StopWatchingEmpty(this);
+    }
+
     private void SaveText()
     {
-        var text = editor.Text.Trim();
-        if (text.Length == 0)
+        if (!editor.TryGetContent(out var content)) return;
+        if (content.Text.Length > 0 && content != loadedContent)
         {
-            editor.Text = card["text"].Str();
-            return;
-        }
-        if (text != card["text"].Str())
-        {
-            Patch(new JsonObject { ["text"] = text });
+            Patch(new JsonObject(), content);
         }
     }
 
-    private void Patch(JsonObject patch)
+    private void LoadText()
+    {
+        app.Cards.StopWatchingEmpty(this);
+        editor.Load(card["text"].Str(), card["rtf"]?.GetValue<string>());
+        loadedContent = editor.GetContent();
+        loadedSource = (card["text"].Str(), card["rtf"].Str());
+    }
+
+    private void Patch(JsonObject patch, (string Text, string Rtf)? validatedDraft = null)
     {
         if (syncing)
         {
             return;
         }
-        // Hiding or archiving can close the window before LostFocus. Include its draft.
-        var draft = editor.Text.Trim();
-        if (draft.Length > 0 && draft != card["text"].Str())
+        var draft = validatedDraft.GetValueOrDefault();
+        var hasDraft = validatedDraft.HasValue || editor.IsEditing;
+        var canSave = !hasDraft || validatedDraft.HasValue || editor.TryGetContent(out draft);
+        if (!canSave && (patch["visible"]?.GetValue<bool>() == false || patch["archived"]?.GetValue<bool>() == true))
         {
-            patch["text"] = draft;
+            app.Bar.ShowMessage(Loc.Error("bad_rich_text"), true);
+            return;
+        }
+        // Hiding or archiving can close the window before LostFocus. Include its draft.
+        if (hasDraft && canSave && draft.Text.Length > 0 && draft != loadedContent)
+        {
+            patch["text"] = draft.Text;
+            patch["rtf"] = draft.Rtf;
+            loadedContent = draft;
         }
         foreach (var (key, pending) in pendingFields)
         {
@@ -361,7 +467,7 @@ internal sealed partial class CardWindow : Window
         try
         {
             var reply = await app.Engine.CallAsync("cards.update", new JsonObject { ["id"] = Id, ["patch"] = patch });
-            if (reply.Ok() || reply["error"].Str() == "card_save_failed")
+            if (reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed")
             {
                 // A disk failure still leaves the accepted edit in the core's dirty cards.
                 foreach (var key in pendingFields.Where(item => item.Value.Version <= version).Select(item => item.Key).ToArray())
@@ -393,17 +499,22 @@ internal sealed partial class CardWindow : Window
         if (!dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
             fitQueued = false;
-            if (!closing) Fit();
+            if (!closing && IsCardVisible) Fit();
         })) fitQueued = false;
     }
 
-    private void Fit() => Overlay.Fit(this, root, CardWidth + 2 * look.ShadowMargin);
+    private void Fit() => Overlay.Fit(this, root, CardWidth + 2 * look.ShadowMargin, keepTop: true);
 }
 
 /// <summary>Keeps one window for each card that should be on the desktop.</summary>
 internal sealed class CardsHost(App app)
 {
+    private const int MaxIndividuallyHiddenWindows = 4;
     private readonly Dictionary<ulong, CardWindow> windows = [];
+    private HashSet<ulong> retainedWindows = [];
+    private readonly HashSet<ulong> closingCards = [];
+    private readonly HashSet<ulong> deletingCards = [];
+    private readonly List<Task> pendingDeletes = [];
     private readonly List<Task> pendingWrites = [];
     private sealed class StyleDraft(long revision, JsonObject? style)
     {
@@ -416,8 +527,16 @@ internal sealed class CardsHost(App app)
     private StyleDraft? clearDraft;
     private long styleRevision;
     private bool flushing;
+    private bool creatingCard;
+    private ulong? newCardToEdit;
+    private static CardsHost? clickWatcher;
+    private CardWindow? emptyCard;
+    private nint emptyClickHook;
+    private bool emptyClickQueued;
+    private long emptyEditRevision;
 
     public bool Shown { get; private set; }
+    public string MarkdownError { get; private set; } = "";
 
     public IReadOnlyList<JsonObject> Cards { get; private set; } = [];
 
@@ -428,24 +547,34 @@ internal sealed class CardsHost(App app)
     public void Apply(JsonObject e)
     {
         Shown = e["showOnDesktop"].Bool();
+        if (!Shown) newCardToEdit = null;
+        MarkdownError = e["markdownError"].Str();
         Cards = (e["cards"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         RetireStyles();
-        var wanted = Shown ? Cards.Where(c => c["visible"].Bool() && !c["archived"].Bool()).ToList() : [];
-        var keep = wanted.Select(c => (ulong)c["id"].Num()).ToHashSet();
-        foreach (var id in windows.Keys.Where(id => !keep.Contains(id)).ToList())
+        var eligible = Cards.Where(c => c["visible"].Bool() && !c["archived"].Bool()).ToList();
+        var eligibleIds = eligible.Select(c => (ulong)c["id"].Num()).ToHashSet();
+        retainedWindows = new HashSet<ulong>(eligibleIds);
+        retainedWindows.UnionWith(Cards.Where(c => !c["visible"].Bool() && !c["archived"].Bool())
+            .Select(c => (ulong)c["id"].Num()).Where(windows.ContainsKey).Take(MaxIndividuallyHiddenWindows));
+        foreach (var id in windows.Keys.Where(id => !retainedWindows.Contains(id)
+            || (!Shown || !eligibleIds.Contains(id)) && windows[id].IsCardVisible).ToList())
         {
-            windows[id].CloseCard();
-            windows.Remove(id);
+            // The delete owner has already frozen and drained this editor. Its completion
+            // closes the window without trying to save to the now-deleted core record.
+            if (deletingCards.Contains(id)) continue;
+            _ = HideOrCloseAsync(id, windows[id]);
         }
         var index = 0;
-        foreach (var c in wanted)
+        foreach (var c in eligible)
         {
             var id = (ulong)c["id"].Num();
+            if (deletingCards.Contains(id)) continue;
             if (windows.TryGetValue(id, out var window))
             {
                 window.Update(c);
+                if (Shown && !closingCards.Contains(id)) window.ShowExisting();
             }
-            else
+            else if (Shown)
             {
                 window = new CardWindow(app, c);
                 windows[id] = window;
@@ -453,6 +582,219 @@ internal sealed class CardsHost(App app)
                 if (flushing) window.PauseEditing();
             }
             index++;
+        }
+        EditNewCardWhenReady();
+    }
+
+    public void CreateDesktopCard()
+    {
+        if (app.Exiting || !Shown || creatingCard || newCardToEdit is not null) return;
+        creatingCard = true;
+        Track(CreateDesktopCardAsync());
+    }
+
+    private async Task CreateDesktopCardAsync()
+    {
+        try
+        {
+            var reply = await app.Engine.CallAsync("cards.add", new JsonObject { ["text"] = "", ["kind"] = "note" });
+            if (reply.Ok())
+            {
+                if (!app.Exiting && Shown)
+                {
+                    newCardToEdit = reply["id"]?.GetValue<ulong>();
+                    EditNewCardWhenReady();
+                }
+            }
+            else if (!app.Exiting) app.Bar.ShowMessage(Loc.Error(reply["error"].Str("save_failed")), true);
+        }
+        catch (Exception)
+        {
+            if (!app.Exiting) app.Bar.ShowMessage(Loc.Error("save_failed"), true);
+        }
+        finally { creatingCard = false; }
+    }
+
+    private void EditNewCardWhenReady()
+    {
+        if (newCardToEdit is not { } id || !Shown || app.Exiting || !windows.TryGetValue(id, out var window)) return;
+        newCardToEdit = null;
+        window.EditNewCard();
+    }
+
+    // Watch one cleared draft at a time. No click hook is needed while its text is nonempty.
+    public unsafe void WatchEmpty(CardWindow window)
+    {
+        if (app.Exiting || !Shown || ReferenceEquals(emptyCard, window)) return;
+        if (emptyClickHook == 0)
+        {
+            emptyClickHook = SetWindowsHookEx(WH_MOUSE_LL, &OnEmptyCardMouse, GetModuleHandle(0), 0);
+            if (emptyClickHook == 0) return;
+            clickWatcher = this;
+        }
+        var previous = emptyCard;
+        emptyCard = window;
+        emptyEditRevision++;
+        previous?.RestoreClearedText();
+    }
+
+    public bool StopWatchingEmpty(CardWindow window)
+    {
+        if (!ReferenceEquals(emptyCard, window)) return false;
+        emptyCard = null;
+        emptyEditRevision++;
+        if (emptyClickHook != 0) UnhookWindowsHookEx(emptyClickHook);
+        emptyClickHook = 0;
+        clickWatcher = null;
+        return true;
+    }
+
+    [UnmanagedCallersOnly]
+    private static unsafe nint OnEmptyCardMouse(int code, nint message, nint data)
+    {
+        try
+        {
+            if (code == HC_ACTION && (uint)message is WM_LBUTTONDOWN or WM_RBUTTONDOWN or WM_MBUTTONDOWN or WM_XBUTTONDOWN)
+            {
+                var info = (LiveListen.Interop.MSLLHOOKSTRUCT*)data;
+                if (info->dwExtraInfo != CoreInputMarker) clickWatcher?.OnPossibleOutsideClick(info->pt);
+            }
+        }
+        catch { /* Never unwind through the Windows input hook. */ }
+        return CallNextHookEx(0, code, message, data);
+    }
+
+    private void OnPossibleOutsideClick(LiveListen.Interop.POINT point)
+    {
+        if (emptyClickQueued || emptyCard is not { } window || app.Exiting || deletingCards.Contains(window.Id)) return;
+        var hit = WindowFromPoint(point);
+        if (hit == 0) return;
+        var target = GetAncestor(hit, GA_ROOT);
+        var owner = GetAncestor(hit, GA_ROOTOWNER);
+        foreach (var cardWindow in windows.Values)
+        {
+            var hwnd = Overlay.Handle(cardWindow);
+            if (hwnd == target || hwnd == owner) return;
+        }
+        // WinUI flyouts can have a separate top-level popup with no card owner.
+        GetWindowThreadProcessId(target, out var pid);
+        if (pid == (uint)Environment.ProcessId && windows.Values.Any(card => card.HasOpenFlyout)) return;
+        var revision = emptyEditRevision;
+        emptyClickQueued = window.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            emptyClickQueued = false;
+            if (revision == emptyEditRevision) _ = DeleteEmptyCardAsync(window);
+        });
+    }
+
+    private async Task DeleteEmptyCardAsync(CardWindow window)
+    {
+        if (app.Exiting || !Shown || !window.IsEmptyDraft) return;
+        var reply = await DeleteAsync(window.Id, window.SavedText);
+        if (!reply.Ok() && !app.Exiting)
+        {
+            if (reply["error"].Str() == "card_changed")
+            {
+                StopWatchingEmpty(window);
+                window.RestoreClearedText();
+            }
+            app.Bar.ShowMessage(Loc.Error(reply["error"].Str("save_failed")), true);
+        }
+    }
+
+    private async Task HideOrCloseAsync(ulong id, CardWindow window)
+    {
+        if (!closingCards.Add(id)) return;
+        try
+        {
+            if (deletingCards.Contains(id)) return;
+            if (!await window.FlushAsync())
+            {
+                window.ResumeEditing();
+                app.Bar.ShowMessage(Loc.Error("save_failed"), true);
+                return;
+            }
+            if (deletingCards.Contains(id)) return;
+            // Keep native state across global visibility changes and a bounded
+            // number of individual hides. Re-check the latest state after flushing.
+            if (retainedWindows.Contains(id))
+            {
+                if (Shown && Cards.Any(card => (ulong)card["id"].Num() == id && card["visible"].Bool() && !card["archived"].Bool()))
+                    window.ShowExisting();
+                else window.HideCard();
+                window.ResumeEditing();
+                return;
+            }
+            if (window.CloseCard() && windows.TryGetValue(id, out var current) && ReferenceEquals(current, window))
+                windows.Remove(id);
+            else window.ResumeEditing();
+        }
+        catch (Exception)
+        {
+            window.ResumeEditing();
+            if (!app.Exiting) app.Bar.ShowMessage(Loc.Error("save_failed"), true);
+        }
+        finally { closingCards.Remove(id); }
+    }
+
+    /// <summary>Drains every owner of a card before deleting its core record.</summary>
+    public Task<JsonObject> DeleteAsync(ulong id, (string Text, string? Rtf)? expected = null)
+    {
+        if (!deletingCards.Add(id)) return Task.FromResult(DeleteFailure());
+        var task = DeleteCoreAsync(id, expected);
+        pendingDeletes.RemoveAll(write => write.IsCompleted);
+        pendingDeletes.Add(task);
+        return task;
+    }
+
+    private static JsonObject DeleteFailure() => new() { ["ok"] = false, ["error"] = "save_failed" };
+
+    private async Task<JsonObject> DeleteCoreAsync(ulong id, (string Text, string? Rtf)? expected)
+    {
+        windows.TryGetValue(id, out var window);
+        var deleted = false;
+        try
+        {
+            if (window is not null && !await window.FlushAsync()) return DeleteFailure();
+            await DrainWritesAsync();
+            RetryRejectedStyles();
+            await DrainWritesAsync();
+            if (styleDrafts.TryGetValue(id, out var style) && !style.Accepted
+                || clearDraft is { Accepted: false }) return DeleteFailure();
+            // Accepted text can still be waiting for a disk retry. Keep it until it has
+            // a durable source before accepting a destructive operation on that card.
+            var snapshot = await app.Engine.CallAsync("cards.list");
+            if (!snapshot.Ok() || snapshot["unsaved"].Bool(true)) return DeleteFailure();
+
+            var request = new JsonObject { ["id"] = id };
+            if (expected is { } source)
+                request["expected"] = new JsonObject { ["text"] = source.Text, ["rtf"] = source.Rtf };
+            var reply = await app.Engine.CallAsync("cards.delete", request);
+            deleted = reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed";
+            if (deleted)
+            {
+                styleDrafts.Remove(id);
+                if (window is not null && windows.TryGetValue(id, out var current) && ReferenceEquals(current, window))
+                {
+                    window.CloseAfterDeletion();
+                    windows.Remove(id);
+                }
+            }
+            return reply;
+        }
+        catch (Exception)
+        {
+            return DeleteFailure();
+        }
+        finally
+        {
+            deletingCards.Remove(id);
+            if (!deleted && window is not null)
+            {
+                var latest = Cards.FirstOrDefault(card => (ulong)card["id"].Num() == id);
+                if (latest is not null) window.Update(latest);
+                window.ResumeEditing();
+            }
         }
     }
 
@@ -492,6 +834,13 @@ internal sealed class CardsHost(App app)
     /// <summary>Saves a card's own style (<c>null</c>: follow the shared style).</summary>
     public Task SetStyle(ulong id, JsonObject? style)
     {
+        // A delayed appearance-page timer must not enqueue a new write after deletion
+        // has drained this card, or leave an unknown-card draft blocking later shutdown.
+        if (deletingCards.Contains(id) || !Cards.Any(card => (ulong)card["id"].Num() == id))
+        {
+            if (!app.Exiting) app.Bar.ShowMessage(Loc.Error("unknown_card"), true);
+            return Task.CompletedTask;
+        }
         var draft = new StyleDraft(++styleRevision, style?.DeepClone() as JsonObject);
         styleDrafts[id] = draft;
         PreviewStyle(id, null);
@@ -522,9 +871,9 @@ internal sealed class CardsHost(App app)
         {
             var patch = new JsonObject { ["style"] = draft.Style?.DeepClone() };
             var reply = await app.Engine.CallAsync("cards.update", new JsonObject { ["id"] = id, ["patch"] = patch });
-            // card_save_failed means the core accepted the patch but disk persistence
-            // is pending. Other failures must remain recoverable across UI windows.
-            draft.Accepted = reply.Ok() || reply["error"].Str() == "card_save_failed";
+            // Persistence errors still mean the core accepted the patch; JSON or
+            // daily Markdown output is pending. Rejected edits remain recoverable.
+            draft.Accepted = reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed";
             if (!reply.Ok() && !app.Exiting)
             {
                 app.Bar.ShowMessage(Loc.Error(reply["error"].Str("save_failed")), true);
@@ -547,7 +896,7 @@ internal sealed class CardsHost(App app)
         try
         {
             reply = await app.Engine.CallAsync("cards.styles.clear");
-            draft.Accepted = reply.Ok() || reply["error"].Str() == "card_save_failed";
+            draft.Accepted = reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed";
             if (draft.Accepted)
             {
                 foreach (var id in styleDrafts.Where(pair => pair.Value.Revision <= draft.Revision).Select(pair => pair.Key).ToArray())
@@ -637,6 +986,9 @@ internal sealed class CardsHost(App app)
         // settings window still has writes waiting in the shared style queue.
         var flushes = windows.Values.ToArray().Select(window => window.FlushAsync()).ToArray();
         await Task.WhenAll(flushes);
+        // A delete confirmed in the notebook may still be draining the desktop editor.
+        // Do not stop the engine while that accepted operation is in flight.
+        await Task.WhenAll(pendingDeletes.ToArray());
         // Includes writes from cards hidden or archived just before exit.
         await DrainWritesAsync();
         RetryRejectedStyles();

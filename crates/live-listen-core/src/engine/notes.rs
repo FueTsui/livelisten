@@ -17,11 +17,16 @@ const CARD_RETRY: Duration = Duration::from_secs(5);
 
 /// Error code for note cards that could not be written; the cards stay in memory.
 const CARD_SAVE_FAILED: &str = "card_save_failed";
+const CARD_MARKDOWN_FAILED: &str = "card_markdown_failed";
 
 pub(super) struct Notes {
     cards: CardBook,
     cards_path: PathBuf,
     cards_dirty: bool,
+    markdown_dir: PathBuf,
+    markdown_dirty: bool,
+    markdown_reported: bool,
+    orphan_protection_pending: bool,
     retry_at: Instant,
     recovery_dir: PathBuf,
 }
@@ -29,10 +34,15 @@ pub(super) struct Notes {
 impl Notes {
     pub(super) fn open(config: &Path) -> Notes {
         let cards_path = config.join("cards.json");
+        let (cards, source_loaded) = CardBook::load_with_status(&cards_path);
         Notes {
-            cards: CardBook::load(&cards_path),
+            cards,
             cards_path,
             cards_dirty: false,
+            markdown_dir: config.to_path_buf(),
+            markdown_dirty: source_loaded,
+            markdown_reported: false,
+            orphan_protection_pending: !source_loaded,
             retry_at: Instant::now(),
             recovery_dir: std::env::temp_dir().join("LiveListen-recovery"),
         }
@@ -42,10 +52,18 @@ impl Notes {
     /// copy is written; an error keeps the core callable so the user can free space and retry.
     pub(super) fn flush(&mut self) -> Result<(), &'static str> {
         if !self.cards_dirty {
+            // The JSON is durable. A Markdown conflict must not trap the user in the app;
+            // a new session rebuilds the projection and reports any remaining conflict.
+            if let Err(e) = self.sync_markdown() {
+                log::warn!("daily notes not synchronized before exit: {}", e.kind());
+            }
             return Ok(());
         }
-        self.cards_dirty = self.cards.save(&self.cards_path).is_err();
+        self.cards_dirty = self.save_primary().is_err();
         if !self.cards_dirty {
+            if let Err(e) = self.sync_markdown() {
+                log::warn!("daily notes not synchronized before exit: {}", e.kind());
+            }
             return Ok(());
         }
         let stamp = format!("{}-{}", paths::unix_ms(), std::process::id());
@@ -60,6 +78,26 @@ impl Notes {
                 Err(CARD_SAVE_FAILED)
             }
         }
+    }
+
+    fn sync_markdown(&mut self) -> std::io::Result<()> {
+        if !self.markdown_dirty {
+            return Ok(());
+        }
+        let result = self.cards.sync_markdown(&self.markdown_dir);
+        self.markdown_dirty = result.is_err();
+        if result.is_ok() {
+            self.markdown_reported = false;
+        }
+        result
+    }
+
+    fn save_primary(&mut self) -> std::io::Result<()> {
+        if self.orphan_protection_pending {
+            CardBook::protect_markdown_orphans(&self.markdown_dir)?;
+            self.orphan_protection_pending = false;
+        }
+        self.cards.save(&self.cards_path)
     }
 }
 
@@ -83,7 +121,7 @@ impl Core {
     /// Writes the cards; on failure they stay in memory and the user is told.
     fn save_cards(&mut self) -> Result<(), String> {
         let failed_before = self.notes.cards_dirty;
-        let result = self.notes.cards.save(&self.notes.cards_path);
+        let result = self.notes.save_primary();
         self.notes.cards_dirty = result.is_err();
         if let Err(e) = result {
             self.notes.retry_at = Instant::now() + CARD_RETRY;
@@ -93,7 +131,18 @@ impl Core {
             }
             Err(err(CARD_SAVE_FAILED))
         } else {
-            Ok(())
+            match self.notes.sync_markdown() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    self.notes.retry_at = Instant::now() + CARD_RETRY;
+                    log::warn!("daily notes not synchronized: {}", e.kind());
+                    if !self.notes.markdown_reported {
+                        self.notes.markdown_reported = true;
+                        self.emit_error("cards", CARD_MARKDOWN_FAILED);
+                    }
+                    Err(err(CARD_MARKDOWN_FAILED))
+                }
+            }
         }
     }
 
@@ -102,6 +151,8 @@ impl Core {
             "event": "cards.changed",
             "cards": self.notes.cards.cards,
             "showOnDesktop": self.notes.cards.show_on_desktop,
+            "markdownPending": self.notes.markdown_dirty,
+            "markdownError": if self.notes.markdown_reported { CARD_MARKDOWN_FAILED } else { "" },
         }));
     }
 
@@ -109,6 +160,7 @@ impl Core {
     pub(super) fn save_note(&mut self, text: &str) {
         match self.notes.cards.add_spoken(text, paths::timestamp(), paths::unix_ms()) {
             Some(id) => {
+                self.notes.markdown_dirty = true;
                 let kind = self.notes.cards.get(id).map(|c| c.kind).unwrap_or_default();
                 if !self.notes.cards.show_on_desktop {
                     self.notes.cards.show_on_desktop = true;
@@ -136,14 +188,18 @@ impl Core {
 
     /// Retries a failed card save.
     pub(super) fn notes_tick(&mut self) {
-        if self.notes.cards_dirty && Instant::now() >= self.notes.retry_at {
+        if (self.notes.cards_dirty || self.notes.markdown_dirty) && Instant::now() >= self.notes.retry_at {
+            let before = (self.notes.cards_dirty, self.notes.markdown_dirty, self.notes.markdown_reported);
             let _ = self.save_cards();
+            if before != (self.notes.cards_dirty, self.notes.markdown_dirty, self.notes.markdown_reported) {
+                self.emit_cards();
+            }
         }
     }
 
     /// When the engine should try a failed card save again.
     pub(super) fn notes_deadline(&self) -> Option<Instant> {
-        self.notes.cards_dirty.then_some(self.notes.retry_at)
+        (self.notes.cards_dirty || self.notes.markdown_dirty).then_some(self.notes.retry_at)
     }
 
     pub(super) fn notes_call(&mut self, cmd: &str, request: &Value) -> Option<Result<Value, String>> {
@@ -152,10 +208,13 @@ impl Core {
                 "cards": self.notes.cards.cards,
                 "showOnDesktop": self.notes.cards.show_on_desktop,
                 "unsaved": self.notes.cards_dirty,
+                "markdownPending": self.notes.markdown_dirty,
+                "markdownError": if self.notes.markdown_reported { CARD_MARKDOWN_FAILED } else { "" },
             })),
             "cards.add" => {
                 let kind = if text_of(request, "kind") == "todo" { CardKind::Todo } else { CardKind::Note };
                 let card = self.notes.cards.add(kind, text_of(request, "text"), paths::timestamp(), paths::unix_ms());
+                self.notes.markdown_dirty = true;
                 let saved = self.save_cards();
                 self.emit_cards();
                 saved.map(|()| json!({"id": card}))
@@ -165,6 +224,13 @@ impl Core {
                     let patch = &request["patch"];
                     match self.notes.cards.update(card, patch) {
                         Ok(()) => {
+                            if patch.as_object().is_some_and(|fields| {
+                                fields.keys().any(|key| {
+                                    matches!(key.as_str(), "text" | "rtf" | "kind" | "done" | "archived" | "createdMs")
+                                })
+                            }) {
+                                self.notes.markdown_dirty = true;
+                            }
                             let saved = self.save_cards();
                             // Moving a card is not news for the other windows.
                             let moved_only = patch.as_object().is_some_and(|m| m.keys().all(|k| k == "x" || k == "y"));
@@ -189,7 +255,18 @@ impl Core {
                 saved.map(|()| json!({"cleared": cleared}))
             }
             "cards.delete" => match id_of(request, "id") {
+                Ok(id)
+                    if request.get("expected").is_some_and(|expected| {
+                        self.notes.cards.get(id).is_some_and(|card| {
+                            expected["text"].as_str() != Some(card.text.as_str())
+                                || expected["rtf"].as_str() != card.rtf.as_deref()
+                        })
+                    }) =>
+                {
+                    Err(err("card_changed"))
+                }
                 Ok(card) if self.notes.cards.remove(card) => {
+                    self.notes.markdown_dirty = true;
                     let saved = self.save_cards();
                     self.emit_cards();
                     saved.map(|()| json!({}))
@@ -237,6 +314,104 @@ mod tests {
 
     fn errors(events: &Mutex<Vec<Value>>, code: &str) -> usize {
         events.lock().unwrap().iter().filter(|e| e["event"] == "error" && e["code"] == code).count()
+    }
+
+    #[test]
+    fn delete_can_require_the_same_text_and_formatting() {
+        let dir = temp_dir("conditional-delete");
+        let (mut core, _, _rx) = core(&dir);
+        let added = core.notes_call("cards.add", &json!({"text": "原文"})).unwrap().unwrap();
+        let id = added["id"].as_u64().unwrap();
+        core.notes_call("cards.update", &json!({"id": id, "patch": {"text": "另一处的修改"}})).unwrap().unwrap();
+        let stale = json!({"id": id, "expected": {"text": "原文", "rtf": null}});
+        assert_eq!(core.notes_call("cards.delete", &stale).unwrap(), Err("card_changed".to_string()));
+        assert_eq!(CardBook::load(&dir.join("cards.json")).cards[0].text, "另一处的修改");
+        let current = json!({"id": id, "expected": {"text": "另一处的修改", "rtf": null}});
+        core.notes_call("cards.delete", &current).unwrap().unwrap();
+        assert!(CardBook::load(&dir.join("cards.json")).cards.is_empty());
+        drop(core);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn markdown_failures_preserve_json_report_and_retry_without_another_edit() {
+        let dir = temp_dir("markdown-retry");
+        std::fs::write(dir.join("随手记"), "blocked").unwrap();
+        let (mut core, events, _rx) = core(&dir);
+        let result = core.notes_call("cards.add", &json!({"text": "持久化原文"})).unwrap();
+        assert_eq!(result, Err(CARD_MARKDOWN_FAILED.to_string()));
+        assert_eq!(CardBook::load(&dir.join("cards.json")).cards[0].text, "持久化原文");
+        assert!(!core.notes.cards_dirty && core.notes.markdown_dirty);
+        assert_eq!(errors(&events, CARD_MARKDOWN_FAILED), 1);
+        assert_eq!(core.notes_call("cards.list", &json!({})).unwrap().unwrap()["markdownPending"], true);
+        core.notes.flush().unwrap(); // A durable JSON card permits shutdown despite an export conflict.
+        assert!(core.notes.markdown_dirty);
+        std::fs::remove_file(dir.join("随手记")).unwrap();
+        core.notes.retry_at = Instant::now();
+        core.notes_tick();
+        assert!(!core.notes.markdown_dirty && core.notes_deadline().is_none());
+        assert_eq!(std::fs::read_dir(dir.join("随手记").join("进行中")).unwrap().count(), 1);
+        drop(core);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_rebuilds_markdown_and_metadata_updates_do_not_touch_it() {
+        let dir = temp_dir("markdown-startup");
+        let mut book = CardBook::default();
+        let id = book.add(CardKind::Note, "已有卡片", paths::timestamp(), paths::unix_ms());
+        book.save(&dir.join("cards.json")).unwrap();
+        let (mut core, _, _rx) = core(&dir);
+        core.notes_tick();
+        assert!(!core.notes.markdown_dirty);
+        let daily = std::fs::read_dir(dir.join("随手记").join("进行中")).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(&daily, "手动修改，元数据变更不应碰此文件").unwrap();
+        core.notes_call("cards.update", &json!({"id": id, "patch": {"x": 10, "y": 20, "style": {"padding": 12}}}))
+            .unwrap()
+            .unwrap();
+        assert!(!core.notes.markdown_dirty);
+        assert_eq!(std::fs::read_to_string(&daily).unwrap(), "手动修改，元数据变更不应碰此文件");
+        assert_eq!(
+            core.notes_call("cards.update", &json!({"id": id, "patch": {"text": "新内容"}})).unwrap(),
+            Err(CARD_MARKDOWN_FAILED.to_string())
+        );
+        assert_eq!(CardBook::load(&dir.join("cards.json")).cards[0].text, "新内容");
+        drop(core);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_or_corrupt_primary_data_does_not_erase_markdown_on_startup() {
+        for corrupt in [false, true] {
+            let dir = temp_dir(if corrupt { "markdown-corrupt" } else { "markdown-missing" });
+            let mut book = CardBook::default();
+            book.add(CardKind::Note, "保留可读的恢复材料", paths::timestamp(), paths::unix_ms());
+            book.sync_markdown(&dir).unwrap();
+            let daily = std::fs::read_dir(dir.join("随手记").join("进行中")).unwrap().next().unwrap().unwrap().path();
+            let before = std::fs::read(&daily).unwrap();
+            if corrupt {
+                std::fs::write(dir.join("cards.json"), "{bad").unwrap();
+            }
+            let (mut core, _, _rx) = core(&dir);
+            core.notes_tick();
+            core.notes.flush().unwrap();
+            assert!(!core.notes.markdown_dirty);
+            assert_eq!(std::fs::read(&daily).unwrap(), before);
+            let added = core.notes_call("cards.add", &json!({"text": "丢失主文件后新建"})).unwrap();
+            assert_eq!(added, Err(CARD_MARKDOWN_FAILED.to_string()));
+            assert_eq!(std::fs::read(&daily).unwrap(), before);
+            let id = core.notes.cards.cards[0].id;
+            core.notes_call("cards.update", &json!({"id": id, "patch": {"createdMs": paths::unix_ms() + 86_400_000}}))
+                .unwrap()
+                .unwrap();
+            assert_eq!(std::fs::read(&daily).unwrap(), before);
+            drop(core);
+            let (mut restarted, _, _rx) = self::core(&dir);
+            restarted.notes_tick();
+            assert_eq!(std::fs::read(&daily).unwrap(), before, "protection survives a new valid JSON and restart");
+            drop(restarted);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

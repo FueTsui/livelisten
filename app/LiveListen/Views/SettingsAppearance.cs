@@ -117,6 +117,7 @@ internal sealed partial class SettingsWindow
         });
         afterPreview?.Invoke();
         var preview = new Surface(previewHost);
+        pageClosing += preview.ReleaseShadow;
         var colorLabels = new List<Action>();
         void Repaint()
         {

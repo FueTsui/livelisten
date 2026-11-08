@@ -15,13 +15,13 @@ namespace LiveListen.Controls;
 internal sealed class Surface
 {
     private readonly Rectangle shape = new();
+    private readonly Grid shadowHost = new();
     private readonly SpriteVisual sprite;
     private readonly DropShadow shadow;
 
     /// <param name="host">An empty grid sized like the panel.</param>
     public Surface(Grid host)
     {
-        var shadowHost = new Grid();
         host.Children.Add(shadowHost);
         host.Children.Add(shape);
         var compositor = ElementCompositionPreview.GetElementVisual(host).Compositor;
@@ -31,7 +31,20 @@ internal sealed class Surface
         shadow.Mask = shape.GetAlphaMask();
         sprite.Shadow = shadow;
         ElementCompositionPreview.SetElementChildVisual(shadowHost, sprite);
-        shape.SizeChanged += (_, e) => sprite.Size = new Vector2((float)e.NewSize.Width, (float)e.NewSize.Height);
+        shape.SizeChanged += ResizeShadow;
+    }
+
+    private void ResizeShadow(object sender, Microsoft.UI.Xaml.SizeChangedEventArgs e) =>
+        sprite.Size = new Vector2((float)e.NewSize.Width, (float)e.NewSize.Height);
+
+    public void ReleaseShadow()
+    {
+        shape.SizeChanged -= ResizeShadow;
+        ElementCompositionPreview.SetElementChildVisual(shadowHost, null);
+        sprite.Shadow = null;
+        shadow.Mask = null;
+        shadow.Dispose();
+        sprite.Dispose();
     }
 
     public void Apply(SurfaceLook look)

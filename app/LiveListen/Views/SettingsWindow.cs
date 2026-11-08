@@ -44,13 +44,27 @@ internal sealed partial class SettingsWindow : Window
     };
     private readonly Grid notebookHost = new();
     private readonly InfoBar banner = new() { IsClosable = true, Margin = new Thickness(36, 0, 36, 8) };
+    private readonly TextBlock generalFooter = new()
+    {
+        Text = "Copyright © 2026 FueTsui. All Rights Reserved.",
+        Style = Res<Style>("SecondaryTextStyle"),
+        HorizontalAlignment = HorizontalAlignment.Center,
+        TextAlignment = TextAlignment.Center,
+        Margin = new Thickness(36, 8, 36, 16),
+        Visibility = Visibility.Collapsed,
+    };
+    private readonly PointerEventHandler rootPointerPressed;
 
     private string current = "dictation";
     private bool applying;
-    private bool settingsClosed;
+    private bool settingsClosed = true;
+    private bool closingSettings;
+    private bool settingsSaveFailureShown;
     private int pageVersion;
     private Action<string, JsonObject>? pageEvents;
     private Action? pageClosing;
+    private Action? resumePage;
+    private (string Tag, JsonNode? Settings)? retainedPage;
     private NotebookView? notebook;
     private ToggleSwitch? dictationTextToggle;
 
@@ -80,17 +94,12 @@ internal sealed partial class SettingsWindow : Window
                 Tag = tag,
             });
         }
-        nav.SelectionChanged += (_, e) =>
-        {
-            if (e.SelectedItem is NavigationViewItem { Tag: string tag })
-            {
-                ShowPage(tag);
-            }
-        };
+        nav.SelectionChanged += OnNavigationChanged;
 
         var content = new Grid();
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         scroller.Content = page;
         Grid.SetRow(scroller, 1);
         content.Children.Add(banner);
@@ -98,6 +107,8 @@ internal sealed partial class SettingsWindow : Window
         notebookHost.Visibility = Visibility.Collapsed;
         Grid.SetRow(notebookHost, 1);
         content.Children.Add(notebookHost);
+        Grid.SetRow(generalFooter, 2);
+        content.Children.Add(generalFooter);
         nav.Content = content;
 
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -116,15 +127,94 @@ internal sealed partial class SettingsWindow : Window
         {
             AppWindow.SetIcon(icon);
         }
-        ApplyTheme();
         PlaceCentered(1060, 760);
-        Closed += (_, _) =>
+        AppWindow.Closing += OnWindowClosing;
+        Activated += OnWindowActivated;
+        rootPointerPressed = (_, e) =>
+        {
+            if (recordingRow is not { } recording) return;
+            for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
+                if (ReferenceEquals(node, recording.Input.View)) return;
+            // Non-focusable labels and page whitespace do not raise LostFocus.
+            // Cancel without handling the pointer so another row can still start.
+            _ = StopRecordingAsync();
+        };
+        root.AddHandler(UIElement.PointerPressedEvent, rootPointerPressed, true);
+    }
+
+    private void OnNavigationChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs e)
+    {
+        if (e.SelectedItem is NavigationViewItem { Tag: string tag }) ShowPage(tag);
+    }
+
+    private async void OnWindowClosing(AppWindow sender, AppWindowClosingEventArgs e)
+    {
+        e.Cancel = true;
+        if (closingSettings) return;
+        closingSettings = true;
+        try { await CloseAfterSavingAsync(); }
+        finally { closingSettings = false; }
+    }
+
+    private void OnWindowActivated(object sender, WindowActivatedEventArgs e)
+    {
+        if (!settingsClosed && e.WindowActivationState == WindowActivationState.Deactivated) _ = StopRecordingAsync();
+    }
+
+    /// <summary>Checks drafts before either the window or the entire app can close.</summary>
+    public async Task<bool> CloseAfterSavingAsync()
+    {
+        if (settingsClosed) return true;
+        await StopRecordingAsync();
+        // Shortcut fields update the local settings tree optimistically. Do not
+        // close away their failure/retry state while the write is still unsaved.
+        if (!await s.SaveNowAsync())
+        {
+            ShowSettingsSaveFailure("save_failed");
+            return false;
+        }
+        if (notebook is not null && !await notebook.FlushAsync())
+        {
+            ShowIssue(Loc.Error("save_failed"));
+            return false;
+        }
+        if (!settingsClosed)
         {
             settingsClosed = true;
-            pageEvents = null;
-            pageClosing?.Invoke();
-        };
-        nav.SelectedItem = nav.MenuItems[0];
+            pageVersion++;
+            notebook?.Release();
+            AppWindow.Hide();
+            serviceDialog?.Hide();
+            if (current is "dictation" or "general")
+            {
+                retainedPage = (current, PageSettings(current)?.DeepClone());
+            }
+            else
+            {
+                ReleasePage();
+                page.Children.Clear();
+            }
+            ReleaseCardStyleTimer();
+            notebookHost.Children.Clear();
+            notebook = null;
+            banner.IsOpen = false;
+            settingsSaveFailureShown = false;
+        }
+        return true;
+    }
+
+    /// <summary>Destroys the shared native host after all pending writes have finished.</summary>
+    public void CloseHost()
+    {
+        AppWindow.Closing -= OnWindowClosing;
+        Activated -= OnWindowActivated;
+        nav.SelectionChanged -= OnNavigationChanged;
+        root.RemoveHandler(UIElement.PointerPressedEvent, rootPointerPressed);
+        ReleasePage();
+        SystemBackdrop = null;
+        SetTitleBar(null);
+        Content = null;
+        Close();
     }
 
     /// <summary>Shows the appearance page with one card's own style selected.</summary>
@@ -147,12 +237,30 @@ internal sealed partial class SettingsWindow : Window
     /// </summary>
     public void Open(string? tag)
     {
+        var reopened = settingsClosed;
+        if (reopened)
+        {
+            settingsClosed = false;
+            ApplyTheme();
+            tag ??= "dictation";
+        }
         if (tag is not null)
         {
             var item = nav.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(i => (string)i.Tag == tag);
             if (item is not null)
             {
-                nav.SelectedItem = item;
+                if (!ReferenceEquals(nav.SelectedItem, item)) nav.SelectedItem = item;
+                else if (reopened)
+                {
+                    if (retainedPage is { } saved && saved.Tag == tag
+                        && JsonNode.DeepEquals(saved.Settings, PageSettings(tag)))
+                    {
+                        retainedPage = null;
+                        resumePage?.Invoke();
+                        scroller.ChangeView(null, 0, null, true);
+                    }
+                    else ShowPage(tag);
+                }
             }
         }
         if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
@@ -162,10 +270,15 @@ internal sealed partial class SettingsWindow : Window
         Controls.Overlay.BringToFront(this);
     }
 
+    private JsonNode? PageSettings(string tag) => s.Get(tag == "dictation" ? "dictation" : "general.startWithWindows");
+
     public void ApplyTheme()
     {
+        if (settingsClosed) return;
         var dark = Theme.IsDark(s.Str("appearance.theme", "system"));
-        root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+        var requested = dark ? ElementTheme.Dark : ElementTheme.Light;
+        if (root.RequestedTheme == requested) return;
+        root.RequestedTheme = requested;
         var bar = AppWindow.TitleBar;
         var transparent = Color.FromArgb(0, 0, 0, 0);
         bar.ButtonBackgroundColor = transparent;
@@ -176,6 +289,7 @@ internal sealed partial class SettingsWindow : Window
         bar.ButtonHoverForegroundColor = bar.ButtonForegroundColor;
         bar.ButtonPressedBackgroundColor = dark ? Color.FromArgb(12, 255, 255, 255) : Color.FromArgb(9, 0, 0, 0);
         bar.ButtonPressedForegroundColor = bar.ButtonForegroundColor;
+        if (!applying) afterOwnChange?.Invoke();
     }
 
     public void OnEngineEvent(string name, JsonObject e)
@@ -191,6 +305,16 @@ internal sealed partial class SettingsWindow : Window
     /// <summary>Rebuilds the page when a setting changed somewhere else, e.g. on the bar.</summary>
     public void OnSettingsChanged(string path)
     {
+        // The window theme and its preview have already been updated by ApplyTheme.
+        if (settingsClosed || path == "appearance.theme") return;
+        if (path is "*" or "hotkeys" or "hotkeys.note") notebook?.RefreshShortcutHint();
+        if (current == "shortcuts")
+        {
+            // Settings acknowledgements must not replace a focused recorder or
+            // destroy an unsaved shortcut candidate. Idle values update in place.
+            refreshShortcutValues?.Invoke();
+            return;
+        }
         if (settingsClosed || serviceDialog is not null || applying || current == "notebook" || path.StartsWith("general.barPosition", StringComparison.Ordinal)
             || path.StartsWith("general.barVisualCenter", StringComparison.Ordinal)
             || path.StartsWith("general.captionsPosition", StringComparison.Ordinal)
@@ -203,7 +327,7 @@ internal sealed partial class SettingsWindow : Window
             dictationTextToggle.IsOn = s.Bool(path);
             return;
         }
-        if (root.XamlRoot is not null && FocusManager.GetFocusedElement(root.XamlRoot) is TextBox or PasswordBox or NumberBox)
+        if (root.XamlRoot is not null && FocusManager.GetFocusedElement(root.XamlRoot) is TextBox or RichEditBox or PasswordBox or NumberBox)
         {
             return;
         }
@@ -213,23 +337,50 @@ internal sealed partial class SettingsWindow : Window
     public void ShowIssue(string message)
     {
         if (settingsClosed) return;
+        settingsSaveFailureShown = false;
         banner.Severity = InfoBarSeverity.Warning;
         banner.Message = message;
         banner.IsOpen = true;
     }
 
+    public void ShowSettingsSaveFailure(string code)
+    {
+        if (settingsClosed) return;
+        if (shortcutSettingsSaving || current == "shortcuts" && shortcutDrafts.Count > 0)
+        {
+            // A shortcut failure belongs to its own description. Keep that draft
+            // available across page changes instead of raising a global banner.
+            foreach (var draft in shortcutDrafts.Values.Where(draft => draft.Saving))
+                draft.Message = Loc.T("key.unsaved");
+            refreshShortcutValues?.Invoke();
+            ClearSavedSettingsIssue();
+            return;
+        }
+        ShowIssue(Loc.Error(code == "stopped" ? code : "save_failed"));
+        settingsSaveFailureShown = code != "stopped";
+    }
+
+    private void ClearSavedSettingsIssue()
+    {
+        if (settingsClosed || !settingsSaveFailureShown) return;
+        settingsSaveFailureShown = false;
+        banner.IsOpen = false;
+    }
+
     private void ShowPage(string tag, bool keepScroll = false)
     {
         if (settingsClosed) return;
+        if (current == "notebook" && tag != "notebook" && notebook?.FinishEditing() == false)
+        {
+            nav.SelectedItem = nav.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(item => item.Tag as string == current);
+            return;
+        }
         pageVersion++;
         var offset = scroller.VerticalOffset;
-        pageClosing?.Invoke();
-        pageClosing = null;
-        pageEvents = null;
-        afterOwnChange = null;
-        dictationTextToggle = null;
+        ReleasePage();
         current = tag;
         page.Children.Clear();
+        generalFooter.Visibility = tag == "general" ? Visibility.Visible : Visibility.Collapsed;
         var isNotebook = tag == "notebook";
         scroller.Visibility = isNotebook ? Visibility.Collapsed : Visibility.Visible;
         notebookHost.Visibility = isNotebook ? Visibility.Visible : Visibility.Collapsed;
@@ -279,6 +430,19 @@ internal sealed partial class SettingsWindow : Window
         {
             scroller.ChangeView(null, 0, null, true);
         }
+    }
+
+    private void ReleasePage()
+    {
+        var release = pageClosing;
+        pageClosing = null;
+        resumePage = null;
+        retainedPage = null;
+        pageEvents = null;
+        afterOwnChange = null;
+        refreshShortcutValues = null;
+        dictationTextToggle = null;
+        release?.Invoke();
     }
 
     private void PlaceCentered(int widthDip, int heightDip)
@@ -332,7 +496,9 @@ internal sealed partial class SettingsWindow : Window
         Card(title, desc, control, glyph, out _);
 
     /// <param name="below">Optional element placed under the description, such as a status line.</param>
-    private Border Card(string title, string? desc, FrameworkElement? control, string? glyph, out TextBlock descBlock, UIElement? below = null)
+    /// <param name="footer">Optional row below the icon, title and controls.</param>
+    private Border Card(string title, string? desc, FrameworkElement? control, string? glyph, out TextBlock descBlock,
+        UIElement? below = null, FrameworkElement? footer = null)
     {
         var grid = new Grid { ColumnSpacing = 16 };
         var column = 0;
@@ -357,6 +523,15 @@ internal sealed partial class SettingsWindow : Window
             control.HorizontalAlignment = HorizontalAlignment.Right;
             Grid.SetColumn(control, column + 1);
             grid.Children.Add(control);
+        }
+        if (footer is not null)
+        {
+            grid.RowDefinitions.Add(new RowDefinition());
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            Grid.SetRow(footer, 1);
+            Grid.SetColumn(footer, column);
+            Grid.SetColumnSpan(footer, 2);
+            grid.Children.Add(footer);
         }
         var card = new Border { Style = Res<Style>("CardStyle"), Child = grid };
         page.Children.Add(card);

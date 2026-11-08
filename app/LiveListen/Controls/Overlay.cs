@@ -158,9 +158,10 @@ internal static unsafe class Overlay
 
     /// <summary>
     /// Resizes the window to the content's desired height at the given width. A window in
-    /// the lower half of the screen keeps its bottom edge, so it grows upwards.
+    /// the lower half of the screen keeps its bottom edge, unless keepTop preserves the
+    /// position of text being selected while a card's bottom toolbar expands.
     /// </summary>
-    public static void Fit(Window window, FrameworkElement root, double widthDip)
+    public static void Fit(Window window, FrameworkElement root, double widthDip, bool keepTop = false)
     {
         root.Measure(new Size(widthDip, double.PositiveInfinity));
         var scale = Scale(window);
@@ -176,7 +177,7 @@ internal static unsafe class Overlay
         var work = WorkArea(window);
         var lower = pos.Y + size.Height / 2 > work.Y + work.Height / 2;
         var x = pos.X + (size.Width - width) / 2;
-        var y = lower ? pos.Y + size.Height - height : pos.Y;
+        var y = lower && !keepTop ? pos.Y + size.Height - height : pos.Y;
         app.MoveAndResize(Clamp(new RectInt32(x, y, width, height), work));
     }
 
@@ -230,7 +231,7 @@ internal sealed class WindowDrag
         handle.PointerPressed += OnPressed;
         handle.PointerMoved += OnMoved;
         handle.PointerReleased += OnReleased;
-        handle.PointerCaptureLost += (_, _) => End();
+        handle.PointerCaptureLost += OnCaptureLost;
     }
 
     public bool Enabled { get; set; } = true;
@@ -240,15 +241,26 @@ internal sealed class WindowDrag
 
     private void OnPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (!Enabled || !e.GetCurrentPoint(handle).Properties.IsLeftButtonPressed)
+        var point = e.GetCurrentPoint(null);
+        if (!Enabled || !point.Properties.IsLeftButtonPressed)
         {
             return;
         }
-        GetCursorPos(out start);
         origin = window.AppWindow.Position;
+        // The input queue can deliver a short drag after the physical mouse has
+        // already reached its end. Keep the press event's position, not the live
+        // GetCursorPos value. Overlay windows have no non-client frame, so root
+        // DIPs map directly to the window's client origin in screen pixels.
+        var scale = Overlay.Scale(window);
+        start = new POINT
+        {
+            X = origin.X + (int)Math.Round(point.Position.X * scale),
+            Y = origin.Y + (int)Math.Round(point.Position.Y * scale),
+        };
         if (keepOnTop) Overlay.RaiseFloating(window);
         dragging = handle.CapturePointer(e.Pointer);
         moved = false;
+        LiveListen.Services.CardSmokeProbe.RecordDrag(window, "pressed", e, dragging, moved, start, origin);
         e.Handled = true;
     }
 
@@ -258,7 +270,15 @@ internal sealed class WindowDrag
         {
             return;
         }
-        GetCursorPos(out var p);
+        MoveToCurrentPointer();
+        LiveListen.Services.CardSmokeProbe.RecordDrag(window, "moved", e, dragging, moved, start, origin);
+    }
+
+    private void MoveToCurrentPointer()
+    {
+        // Once dragging starts the window origin changes. Screen coordinates
+        // avoid combining queued client coordinates with that new origin.
+        if (!GetCursorPos(out var p)) return;
         var dx = p.X - start.X;
         var dy = p.Y - start.Y;
         if (!moved && Math.Abs(dx) + Math.Abs(dy) < 3)
@@ -274,7 +294,18 @@ internal sealed class WindowDrag
 
     private void OnReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (!dragging) return;
+        // A quick gesture may have no final PointerMoved callback. Apply its
+        // last position before releasing capture (which can synchronously End).
+        MoveToCurrentPointer();
+        LiveListen.Services.CardSmokeProbe.RecordDrag(window, "released", e, dragging, moved, start, origin);
         handle.ReleasePointerCapture(e.Pointer);
+        End();
+    }
+
+    private void OnCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        LiveListen.Services.CardSmokeProbe.RecordDrag(window, "capture-lost", e, dragging, moved, start, origin);
         End();
     }
 

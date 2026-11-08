@@ -1,6 +1,6 @@
 # 安装、升级与卸载
 
-适用于 LiveListen 0.1.0。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
+适用于 LiveListen 0.1.1。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
 
 ## 系统要求
 
@@ -12,10 +12,10 @@
 
 ## 核对校验值
 
-安装包 `LiveListen-Setup-0.1.0-x64.exe`、便携包 `LiveListen-0.1.0-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
+安装包 `LiveListen-Setup-0.1.1-x64.exe`、便携包 `LiveListen-0.1.1-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
 
 ```powershell
-Get-FileHash .\LiveListen-Setup-0.1.0-x64.exe -Algorithm SHA256
+Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
 ```
 
 结果应与 `SHA256SUMS.txt` 中对应行一致，不一致时不要运行。校验值只证明文件没有变化，不能代替发布者签名或可信来源。
@@ -35,6 +35,10 @@ Get-FileHash .\LiveListen-Setup-0.1.0-x64.exe -Algorithm SHA256
 安装包启动时先校验整个安装包；损坏或不完整的安装包不会写入任何文件。新的安装位置必须是完整路径，并且是空文件夹或尚不存在的文件夹；不能直接用系统或用户文件夹本身，路径过长时也会提示改选。
 
 ## 升级与修复
+
+在「设置 → 通用 → 实时聆听」点击「检查更新」，版本说明会显示检查结果。有新正式版本时，应用会自动下载：安装版下载 x64 安装包，便携版下载 x64 ZIP。下载进度、校验结果和失败原因都在原位置显示，可直接重试，不再弹窗跳转 GitHub。
+
+更新包保存在 `%LOCALAPPDATA%\LiveListen\Updates` 下的独立目录，按 GitHub 发布资产的 SHA-256 和文件大小校验；不完整或校验失败的文件不会标记为可用。完成后点击「打开下载位置」，由用户运行安装包或解压便携包。应用不会自动执行安装包或覆盖当前程序。切换设置页或关闭设置窗口不会中断正在进行的下载；退出整个应用会中断下载，下次检查重新下载。
 
 运行新版本安装包即可升级。窗口会显示「将从 vX 升级」，安装位置沿用当前安装。
 
@@ -86,7 +90,7 @@ Get-FileHash .\LiveListen-Setup-0.1.0-x64.exe -Algorithm SHA256
 在 PowerShell 中读取退出码：
 
 ```powershell
-$p = Start-Process .\LiveListen-Setup-0.1.0-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
+$p = Start-Process .\LiveListen-Setup-0.1.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
 $p.ExitCode
 ```
 
@@ -101,8 +105,8 @@ $p.ExitCode
 不想安装时，可使用便携包：
 
 ```powershell
-Expand-Archive -LiteralPath .\LiveListen-0.1.0-portable-x64.zip -DestinationPath .\LiveListen-0.1.0
-.\LiveListen-0.1.0\LiveListen\LiveListen.exe
+Expand-Archive -LiteralPath .\LiveListen-0.1.1-portable-x64.zip -DestinationPath .\LiveListen-0.1.1
+.\LiveListen-0.1.1\LiveListen\LiveListen.exe
 ```
 
 - 完整解压到一个新的普通文件夹，不要只复制 EXE，也不要在压缩包内运行。

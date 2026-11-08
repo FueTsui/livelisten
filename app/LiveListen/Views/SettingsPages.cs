@@ -11,7 +11,27 @@ namespace LiveListen.Views;
 
 internal sealed partial class SettingsWindow
 {
-    private string? recordingField;
+    private sealed class ShortcutRow(string field, HotkeyInput input, TextBlock status, Button retry)
+    {
+        public string Field { get; } = field;
+        public HotkeyInput Input { get; } = input;
+        public TextBlock Status { get; } = status;
+        public Button Retry { get; } = retry;
+        public string? Draft { get; set; }
+    }
+    private sealed class ShortcutDraft(string binding)
+    {
+        public string Binding { get; } = binding;
+        public string Message { get; set; } = T("key.saving");
+        public bool Saving { get; set; } = true;
+    }
+    private readonly Dictionary<string, ShortcutDraft> shortcutDrafts = [];
+    private readonly SemaphoreSlim hotkeyOperations = new(1, 1);
+    private bool shortcutSettingsSaving;
+    private ShortcutRow? recordingRow;
+    private ulong? captureToken;
+    private long captureRevision;
+    private Action? refreshShortcutValues;
     private Action? afterOwnChange;
 
     private static string T(string key) => Loc.T(key);
@@ -23,6 +43,7 @@ internal sealed partial class SettingsWindow
         var mic = Combo("dictation.microphone", [("", T("dict.mic.default"))], 280);
         Card(T("dict.mic.title"), null, mic, "");
         _ = FillMicrophones(mic);
+        resumePage = () => _ = FillMicrophones(mic);
         Block(T("dict.preconnect.title"), T("dict.preconnect.desc"), Radios("dictation.preconnectLevel",
             ("off", T("preconnect.off.desc")),
             ("balanced", T("preconnect.balanced.desc")),
@@ -58,8 +79,14 @@ internal sealed partial class SettingsWindow
         {
             return;
         }
-        var known = combo.Items.OfType<ComboBoxItem>().Select(i => i.Tag as string).ToHashSet();
-        foreach (var name in list.Select(n => n.Str()).Where(n => n.Length > 0 && !known.Contains(n)))
+        var devices = list.Select(n => n.Str()).Where(n => n.Length > 0).ToHashSet();
+        foreach (var item in combo.Items.OfType<ComboBoxItem>().ToArray())
+        {
+            var name = (string)item.Tag;
+            if (name.Length == 0 || devices.Remove(name) || ReferenceEquals(item, combo.SelectedItem)) continue;
+            combo.Items.Remove(item);
+        }
+        foreach (var name in devices)
         {
             combo.Items.Add(new ComboBoxItem { Content = name, Tag = name });
         }
@@ -106,98 +133,185 @@ internal sealed partial class SettingsWindow
     private void BuildShortcuts()
     {
         var version = pageVersion;
-        var rows = new Dictionary<string, (TextBlock Key, TextBlock Status)>();
+        var rows = new List<ShortcutRow>();
         foreach (var field in new[] { "hold", "toggle", "captions", "note", "cards" })
         {
-            var key = new TextBlock
-            {
-                Text = Theme.Keys(s.Str("hotkeys." + field)),
-                Style = Res<Style>("BodyStrongTextBlockStyle"),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 8, 0),
-            };
-            var status = Note();
-            var change = new Button { Content = T("key.change") };
-            var clear = new Button { Content = T("key.clear") };
-            var f = field;
-            change.Click += async (_, _) =>
-            {
-                // Calls run on the thread pool: await the stop so it cannot overtake the start.
-                await StopRecordingAsync();
-                var reply = await app.Engine.CallAsync("hotkey.record", new JsonObject { ["on"] = true });
-                if (settingsClosed || version != pageVersion)
-                {
-                    // The page went away meanwhile; never leave the keyboard being recorded.
-                    if (reply.Ok()) _ = app.Engine.CallAsync("hotkey.record", new JsonObject { ["on"] = false });
-                    return;
-                }
-                if (!reply.Ok())
-                {
-                    status.Text = Loc.Error(reply["error"].Str());
-                    return;
-                }
-                recordingField = f;
-                status.Text = T("key.recording");
-            };
-            clear.Click += (_, _) =>
-            {
-                _ = StopRecordingAsync();
-                Set("hotkeys." + f, "");
-                key.Text = Theme.Keys("");
-                status.Text = "";
-            };
-            Card(T($"key.{field}.title"), T($"key.{field}.desc"), Horizontal(key, change, clear), null, out _, status);
-            rows[field] = (key, status);
+            var input = new HotkeyInput(T($"key.{field}.title"), s.Str("hotkeys." + field));
+            var retry = new Button { Content = T("key.retry"), Visibility = Visibility.Collapsed, Padding = new Thickness(8, 2, 8, 2), MinHeight = 24 };
+            Card(T($"key.{field}.title"), T($"key.{field}.desc"), input.View, null, out var status, retry);
+            var row = new ShortcutRow(field, input, status, retry);
+            rows.Add(row);
+            input.Requested += () => _ = StartRecordingAsync(row, version);
+            input.Cancelled += () => { if (recordingRow == row) _ = StopRecordingAsync(); };
+            input.Committed += binding => _ = SaveShortcutAsync(row, binding, version);
+            input.ClearRequested += () => _ = SaveShortcutAsync(row, "", version);
+            input.Unsupported += () => status.Text = T("key.invalid");
+            retry.Click += (_, _) => { if (row.Draft is { } draft) _ = SaveShortcutAsync(row, draft, version); };
         }
-
-        pageEvents = (name, e) =>
+        refreshShortcutValues = () =>
         {
-            if (name != "hotkey.recorded" || recordingField is not { } field)
+            foreach (var row in rows)
             {
-                return;
+                if (row.Input.IsCapturing) continue;
+                if (shortcutDrafts.TryGetValue(row.Field, out var draft))
+                {
+                    row.Draft = draft.Binding;
+                    row.Input.SetValue(draft.Binding);
+                    row.Input.SetBusy(draft.Saving);
+                    row.Status.Text = draft.Message;
+                    row.Retry.Visibility = draft.Saving ? Visibility.Collapsed : Visibility.Visible;
+                }
+                else
+                {
+                    var wasPending = row.Input.IsBusy || row.Draft is not null;
+                    row.Input.SetBusy(false);
+                    row.Draft = null;
+                    row.Input.SetValue(s.Str("hotkeys." + row.Field));
+                    row.Retry.Visibility = Visibility.Collapsed;
+                    if (wasPending) row.Status.Text = T($"key.{row.Field}.desc");
+                }
             }
-            recordingField = null;
-            var (key, status) = rows[field];
-            var binding = e["binding"].Str();
-            if (binding.Length == 0)
-            {
-                status.Text = "";
-                return;
-            }
-            _ = SaveRecorded(field, binding, key, status);
         };
+        refreshShortcutValues();
         pageClosing = () => _ = StopRecordingAsync();
+    }
 
-        async Task SaveRecorded(string field, string binding, TextBlock key, TextBlock status)
+    private async Task StartRecordingAsync(ShortcutRow row, int version)
+    {
+        var request = ++captureRevision;
+        if (recordingRow is { } previous) { previous.Input.Stop(); previous.Status.Text = previous.Draft is null ? T($"key.{previous.Field}.desc") : T("key.unsaved"); }
+        recordingRow = row;
+        row.Input.Prepare();
+        row.Status.Text = T("key.preparing");
+        await hotkeyOperations.WaitAsync();
+        try
         {
-            var check = await app.Engine.CallAsync("hotkey.check", new JsonObject { ["binding"] = binding, ["field"] = field });
-            if (settingsClosed || version != pageVersion) return;
-            var conflict = check["conflict"].Str();
-            if (!check["valid"].Bool())
+            await ReleaseCaptureAsync();
+            if (settingsClosed || version != pageVersion || request != captureRevision || !row.Input.HasInputFocus) return;
+            var reply = await app.Engine.CallAsync("hotkey.capture", new JsonObject
             {
-                status.Text = conflict == "modifier_only" ? T("key.conflict.modifier_only") : T("key.invalid");
+                ["on"] = true, ["window"] = Overlay.Handle(this).ToInt64(),
+            });
+            if (!reply.Ok() || !reply["active"].Bool() || reply["token"] is null)
+            {
+                row.Status.Text = Loc.Error(reply["error"].Str("capture_unavailable"));
                 return;
             }
-            if (conflict == "duplicate")
+            captureToken = reply["token"]!.GetValue<ulong>();
+            if (settingsClosed || version != pageVersion || request != captureRevision || !row.Input.HasInputFocus)
             {
-                status.Text = T("key.conflict.duplicate");
+                await ReleaseCaptureAsync();
                 return;
             }
-            var display = check["display"].Str();
-            Set("hotkeys." + field, display);
-            key.Text = Theme.Keys(display);
-            status.Text = conflict == "in_use" ? T("key.conflict.in_use") : Loc.F("key.saved", Theme.Keys(display));
+            row.Input.Begin();
+            row.Status.Text = T("key.recording");
+        }
+        catch (Exception) { if (!settingsClosed && version == pageVersion) row.Status.Text = Loc.Error("capture_unavailable"); }
+        finally
+        {
+            if (request == captureRevision && captureToken is null) { row.Input.Stop(); recordingRow = null; }
+            hotkeyOperations.Release();
         }
     }
 
-    private Task StopRecordingAsync()
+    private async Task StopRecordingAsync()
     {
-        if (recordingField is null)
+        captureRevision++;
+        var stoppedRow = recordingRow;
+        if (recordingRow is { } row)
         {
-            return Task.CompletedTask;
+            row.Input.Stop();
+            row.Status.Text = row.Draft is null ? T($"key.{row.Field}.desc") : T("key.unsaved");
+            recordingRow = null;
         }
-        recordingField = null;
-        return app.Engine.CallAsync("hotkey.record", new JsonObject { ["on"] = false });
+        await hotkeyOperations.WaitAsync();
+        try { await ReleaseCaptureAsync(); }
+        catch (Exception)
+        {
+            if (!settingsClosed && stoppedRow is not null)
+                stoppedRow.Status.Text = Loc.Error("capture_unavailable");
+        }
+        finally { hotkeyOperations.Release(); }
+    }
+
+    private async Task ReleaseCaptureAsync()
+    {
+        if (captureToken is not { } token) return;
+        captureToken = null;
+        var reply = await app.Engine.CallAsync("hotkey.capture", new JsonObject { ["on"] = false, ["token"] = token });
+        if (!reply.Ok()) throw new InvalidOperationException("capture_unavailable");
+    }
+
+    private async Task SaveShortcutAsync(ShortcutRow row, string binding, int version)
+    {
+        if (row.Input.IsBusy) return;
+        captureRevision++;
+        if (recordingRow is { } active) { active.Input.Stop(); recordingRow = null; }
+        row.Input.Stop();
+        var draft = new ShortcutDraft(binding);
+        shortcutDrafts[row.Field] = draft;
+        row.Draft = binding;
+        row.Input.SetValue(binding);
+        row.Input.SetBusy(true);
+        row.Retry.Visibility = Visibility.Collapsed;
+        row.Status.Text = T("key.saving");
+        await hotkeyOperations.WaitAsync();
+        try
+        {
+            await ReleaseCaptureAsync();
+            if (settingsClosed || version != pageVersion) return;
+            var canonical = HotkeyCaptureState.Canonical(binding);
+            if (canonical is null) { row.Status.Text = T("key.invalid"); return; }
+            bool Duplicate(string value) => s.Root["hotkeys"] is JsonObject all
+                && HotkeyCaptureState.HasDuplicate(value, row.Field, all.Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.Str())));
+            if (Duplicate(canonical)) { row.Status.Text = T("key.conflict.duplicate"); return; }
+            var conflict = "";
+            if (canonical.Length > 0)
+            {
+                var check = await app.Engine.CallAsync("hotkey.check", new JsonObject { ["binding"] = canonical, ["field"] = row.Field });
+                if (settingsClosed || version != pageVersion) return;
+                conflict = check["conflict"].Str();
+                if (!check["valid"].Bool())
+                {
+                    row.Status.Text = conflict == "modifier_only" ? T("key.conflict.modifier_only") : check["error"] is not null ? Loc.Error(check["error"].Str()) : T("key.invalid");
+                    return;
+                }
+                if (conflict == "duplicate" || Duplicate(canonical)) { row.Status.Text = T("key.conflict.duplicate"); return; }
+                canonical = check["display"].Str(canonical);
+            }
+            shortcutSettingsSaving = true;
+            try
+            {
+                Set("hotkeys." + row.Field, canonical);
+                if (!await s.SaveNowAsync()) { row.Status.Text = T("key.unsaved"); return; }
+            }
+            finally { shortcutSettingsSaving = false; }
+            if (HotkeyCaptureState.Canonical(s.Str("hotkeys." + row.Field)) != HotkeyCaptureState.Canonical(canonical))
+            {
+                row.Status.Text = T("key.invalid");
+                return;
+            }
+            ClearSavedSettingsIssue();
+            row.Draft = null;
+            row.Input.SetValue(canonical);
+            row.Status.Text = (canonical.Length == 0 ? T("key.cleared") : Loc.F("key.saved", Theme.Keys(canonical)))
+                + (conflict == "in_use" ? " · " + T("key.conflict.in_use") : "");
+        }
+        catch (Exception) { row.Status.Text = T("key.unsaved"); }
+        finally
+        {
+            row.Input.SetBusy(false);
+            row.Retry.Visibility = row.Draft is null ? Visibility.Collapsed : Visibility.Visible;
+            if (row.Draft is not null && row.Status.Text != T("key.unsaved"))
+                row.Status.Text = Loc.F("key.notSavedReason", row.Status.Text);
+            if (shortcutDrafts.TryGetValue(row.Field, out var latest) && ReferenceEquals(latest, draft))
+            {
+                if (row.Draft is null) shortcutDrafts.Remove(row.Field);
+                else { draft.Saving = false; draft.Message = row.Status.Text; }
+            }
+            hotkeyOperations.Release();
+            if (!settingsClosed) refreshShortcutValues?.Invoke();
+        }
     }
 
     // ---- 服务 -------------------------------------------------------------------------------
@@ -291,13 +405,14 @@ internal sealed partial class SettingsWindow
     private async Task ShowServiceDialog(JsonObject draft, bool isNew)
     {
         if (settingsClosed || serviceDialog is not null || root.XamlRoot is null) return;
+        var version = pageVersion;
         var id = draft["id"].Str();
         var kind = draft["providerType"].Str("command");
         var official = kind is "doubao" or "openai" or "qwen" or "tencent";
         var secretName = "speech." + id;
         var secretReply = await app.Engine.CallAsync("secret.status", new JsonObject { ["names"] = new JsonArray(secretName) });
         // A second click may have opened the dialog while this one waited.
-        if (settingsClosed || serviceDialog is not null || root.XamlRoot is null) return;
+        if (settingsClosed || pageVersion != version || serviceDialog is not null || root.XamlRoot is null) return;
         var hasSecret = secretReply["secrets"]?[secretName].Bool() ?? false;
         // Work only on this draft; cancelled dialogs must never reach automatic settings saves.
         var panel = new StackPanel { Spacing = 12, MinWidth = 360 };
@@ -482,7 +597,7 @@ internal sealed partial class SettingsWindow
                 if (!reply.Ok()) ShowIssue(Loc.Error(reply["error"].Str()));
             }
             serviceDialog = null;
-            if (!settingsClosed && changed && current == "services") ShowPage(current, keepScroll: true);
+            if (!settingsClosed && changed && pageVersion == version) ShowPage(current, keepScroll: true);
         }
     }
 
@@ -552,36 +667,73 @@ internal sealed partial class SettingsWindow
     {
         Card(T("gen.startup.title"), null, Toggle("general.startWithWindows"), "");
         var diagStatus = Note();
+        diagStatus.Visibility = Visibility.Collapsed;
         var export = ActionButton(T("gen.diag.export"), async () =>
         {
+            var exportPageVersion = pageVersion;
             var reply = await app.Engine.CallAsync("diagnostics.export");
-            if (reply.Ok())
+            var path = reply.Ok() ? reply["path"].Str() : null;
+            if (!settingsClosed && pageVersion == exportPageVersion)
             {
-                var path = reply["path"].Str();
-                diagStatus.Text = Loc.F("gen.diag.done", path);
-                app.OpenFolder(Path.GetDirectoryName(path) ?? app.ConfigDir);
+                diagStatus.Text = path is null ? Loc.Error(reply["error"].Str()) : Loc.F("gen.diag.done", path);
+                diagStatus.Visibility = Visibility.Visible;
             }
-            else
-            {
-                diagStatus.Text = Loc.Error(reply["error"].Str());
-            }
+            if (path is not null) app.OpenFolder(Path.GetDirectoryName(path) ?? app.ConfigDir);
         });
         var logs = ActionButton(T("gen.logs"), () =>
             app.OpenFolder(string.IsNullOrEmpty(app.LogFile) ? app.ConfigDir : Path.GetDirectoryName(app.LogFile) ?? app.ConfigDir));
-        Card(T("gen.diag.title"), null, Horizontal(export, logs), "", out _, diagStatus);
+        Card(T("gen.diag.title"), null, Horizontal(export, logs), "", out _, footer: diagStatus);
         var update = new Button { Content = T("gen.update"), MinWidth = 88 };
+        var downloads = new Button { Content = T("gen.update.open"), Visibility = Visibility.Collapsed };
+        var progress = new ProgressBar { Minimum = 0, Maximum = 100, Height = 3, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
+        Card(T("app.name"), Loc.F("gen.version", EngineHost.Version), Horizontal(update, downloads), "", out var versionText, progress);
+        var updater = UpdateService.Shared;
+        var alive = true;
+        void Render(UpdateStatus status)
+        {
+            if (!alive || settingsClosed) return;
+            var version = Loc.F("gen.version", EngineHost.Version);
+            var detail = status.Phase switch
+            {
+                UpdatePhase.Checking => T("gen.update.checking"),
+                UpdatePhase.Current => T("gen.update.current"),
+                UpdatePhase.Downloading => Loc.F("gen.update.downloading", status.Version!, status.Percent),
+                UpdatePhase.Verifying => Loc.F("gen.update.verifying", status.Version!),
+                UpdatePhase.Ready => Loc.F("gen.update.ready", status.Version!),
+                UpdatePhase.Failed => (status.Version is null ? "" : Loc.F("gen.version", status.Version) + " · ") + T("gen.update.error." + status.Error),
+                _ => "",
+            };
+            versionText.Text = string.IsNullOrEmpty(detail) ? version : version + " · " + detail;
+            update.IsEnabled = status.Phase is not (UpdatePhase.Checking or UpdatePhase.Downloading or UpdatePhase.Verifying);
+            update.Content = T(status.Phase == UpdatePhase.Failed ? "gen.update.retry" : "gen.update");
+            progress.Visibility = update.IsEnabled ? Visibility.Collapsed : Visibility.Visible;
+            progress.IsIndeterminate = status.Phase is UpdatePhase.Checking or UpdatePhase.Verifying;
+            progress.Value = status.Percent;
+            downloads.Visibility = status.Phase == UpdatePhase.Ready ? Visibility.Visible : Visibility.Collapsed;
+        }
+        void Updated(UpdateStatus status)
+        {
+            if (!settingsClosed) DispatcherQueue.TryEnqueue(() => Render(status));
+        }
+        updater.Changed += Updated;
+        pageClosing += () => { alive = false; updater.Changed -= Updated; };
+        resumePage = () =>
+        {
+            diagStatus.Text = "";
+            diagStatus.Visibility = Visibility.Collapsed;
+            Render(updater.Status);
+        };
+        Render(updater.Status);
         update.Click += async (_, _) =>
         {
-            update.IsEnabled = false;
-            try { await UpdateService.CheckAsync(this); }
-            finally { if (!settingsClosed) update.IsEnabled = true; }
+            var directory = Path.Combine(EngineHost.TestConfigDir ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiveListen"), "Updates");
+            await updater.CheckAsync(EngineHost.Version, directory, File.Exists(Path.Combine(AppContext.BaseDirectory, "Uninstall.exe")));
         };
-        Card(T("app.name"), Loc.F("gen.version", EngineHost.Version), update, "");
-        page.Children.Add(new TextBlock
+        downloads.Click += (_, _) =>
         {
-            Text = "Copyright © 2026 FueTsui. All Rights Reserved.",
-            Style = Res<Style>("SecondaryTextStyle"), TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 24, 0, 0),
-        });
+            if (updater.Status.DownloadPath is { } path && Path.GetDirectoryName(path) is { } directory)
+                app.OpenFolder(directory);
+        };
     }
 }

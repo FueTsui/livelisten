@@ -15,6 +15,7 @@ var checks = new (string Name, Func<Task> Run)[]
     ("voice responds only to live levels and releases stale input", VoiceLevels),
     ("hidden or reduced-motion voice stops and clears old input", VoiceVisibility),
     ("wheel sizing follows fine deltas linearly, reverses and clamps", VoiceWheel),
+    ("live text stays below unless it would cross the screen bottom", LiveTextEdges),
     ("unwritten clipboard copies latest suffix once and recovers from a busy clipboard", ClipboardRetry),
     ("new text replaces pending clipboard retries without stale overwrite", ClipboardLatest),
     ("new dictation cancels clipboard retries and failure never claims copied", ClipboardCancelAndFailure),
@@ -31,6 +32,16 @@ Console.WriteLine($"{checks.Length} checks passed");
 static void Check(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+static Task LiveTextEdges()
+{
+    const double reach = 120;
+    Check(!VoiceSizing.LiveCaptionAbove(reach + 1, reach), "Text flipped before reaching the screen bottom.");
+    Check(!VoiceSizing.LiveCaptionAbove(reach, reach), "Text flipped on contact without crossing the boundary.");
+    Check(VoiceSizing.LiveCaptionAbove(reach - 1, reach), "Text stayed below after crossing the boundary.");
+    Check(!VoiceSizing.LiveCaptionAbove(reach, reach), "Text did not return below when it fit again.");
+    return Task.CompletedTask;
 }
 
 static TaskCompletionSource<T> Signal<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);

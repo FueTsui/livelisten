@@ -12,7 +12,10 @@ use serde_json::Value;
 use crate::config::SurfaceStyle;
 use crate::paths::write_atomic;
 
+mod markdown;
+
 const MAX_TEXT: usize = 4000;
+const MAX_RTF_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +31,9 @@ pub struct Card {
     pub id: u64,
     pub kind: CardKind,
     pub text: String,
+    /// Native editor formatting, paired with `text` for previews and plain-text consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtf: Option<String>,
     /// When it was said, UTC ISO 8601; the UI shows it as the card's date.
     pub created: String,
     pub created_ms: u64,
@@ -86,16 +92,114 @@ fn clip(text: &str) -> String {
     text.trim().chars().take(MAX_TEXT).collect()
 }
 
+/// Checks the bounded, text-only RTF envelope before passing it to the native editor.
+/// This is not an RTF renderer: the UI must export `text` and `rtf` from one document.
+fn valid_rtf(rtf: &str, text: &str) -> bool {
+    if rtf.len() > MAX_RTF_BYTES || text.trim().chars().count() > MAX_TEXT || rtf.contains('\0') {
+        return false;
+    }
+    let bytes = rtf.as_bytes();
+    if !bytes.starts_with(b"{\\rtf1") || bytes.get(6).is_none_or(u8::is_ascii_digit) {
+        return false;
+    }
+    let mut depth = 0_u32;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'{' => {
+                depth += 1;
+                if depth > 128 {
+                    return false;
+                }
+            }
+            b'}' => {
+                let Some(next) = depth.checked_sub(1) else { return false };
+                depth = next;
+                if depth == 0 && bytes[at + 1..].iter().any(|b| !b.is_ascii_whitespace()) {
+                    return false;
+                }
+            }
+            b'\\' => {
+                at += 1;
+                if at == bytes.len() {
+                    return false;
+                }
+                let start = at;
+                while at < bytes.len() && bytes[at].is_ascii_alphabetic() {
+                    at += 1;
+                }
+                if at > start {
+                    let word = &rtf[start..at];
+                    // The card editor needs text, formatting and hyperlinks, never embedded
+                    // files, OLE objects, pictures, binary data or external file tables.
+                    if [
+                        "object",
+                        "objdata",
+                        "objclass",
+                        "objname",
+                        "objalias",
+                        "oleclsid",
+                        "pict",
+                        "shppict",
+                        "nonshppict",
+                        "listpicture",
+                        "bin",
+                        "filetbl",
+                        "file",
+                        "datastore",
+                    ]
+                    .iter()
+                    .any(|blocked| word.eq_ignore_ascii_case(blocked))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                // Escaped braces/backslashes and control symbols do not change group depth.
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    depth == 0
+}
+
 impl CardBook {
+    /// Rebuilds the daily Markdown view without modifying unrelated or hand-edited files.
+    pub fn sync_markdown(&self, config_dir: &Path) -> std::io::Result<()> {
+        markdown::sync(self, config_dir)
+    }
+
+    pub(crate) fn protect_markdown_orphans(config_dir: &Path) -> std::io::Result<()> {
+        markdown::protect_orphans(config_dir)
+    }
+
     /// Loads the book; a damaged file is kept as `.bad` and an empty book is used.
     pub fn load(path: &Path) -> CardBook {
+        Self::load_with_status(path).0
+    }
+
+    /// The status distinguishes a valid empty source from missing or corrupt data, so a
+    /// startup projection cannot erase readable Markdown recovery copies in the latter case.
+    pub(crate) fn load_with_status(path: &Path) -> (CardBook, bool) {
         match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                log::warn!("cards file is invalid ({e}); starting empty");
-                let _ = fs::rename(path, path.with_extension("json.bad"));
-                CardBook::default()
-            }),
-            Err(_) => CardBook::default(),
+            Ok(text) => match serde_json::from_str::<CardBook>(&text) {
+                Ok(mut book) => {
+                    for card in &mut book.cards {
+                        // Keep the plain text usable if a saved rich document is damaged.
+                        if card.rtf.as_ref().is_some_and(|rtf| !valid_rtf(rtf, &card.text)) {
+                            card.rtf = None;
+                        }
+                    }
+                    (book, true)
+                }
+                Err(e) => {
+                    log::warn!("cards file is invalid ({e}); starting empty");
+                    let _ = fs::rename(path, path.with_extension("json.bad"));
+                    (CardBook::default(), false)
+                }
+            },
+            Err(_) => (CardBook::default(), false),
         }
     }
 
@@ -125,10 +229,23 @@ impl CardBook {
 
     /// Applies `text`, `kind`, `done`, `archived`, `visible`, `x`, `y`, `createdMs` (the
     /// card's date, Unix milliseconds between 2000 and 2100) and `style` (an object, or `null`
-    /// to follow the shared card style again) from `patch`. Nothing changes on an error.
+    /// to follow the shared card style again) from `patch`. `rtf` requires its matching
+    /// `text`; a plain-text edit clears old formatting. Nothing changes on an error.
     pub fn update(&mut self, id: u64, patch: &Value) -> Result<(), &'static str> {
         const YEAR_2000: u64 = 946_684_800_000;
         const YEAR_2100: u64 = 4_102_444_800_000;
+        let rtf = match patch.get("rtf") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(rtf)) => {
+                let text = patch["text"].as_str().ok_or("bad_rich_text")?;
+                if !valid_rtf(rtf, text) {
+                    return Err("bad_rich_text");
+                }
+                Some(Some(rtf.clone()))
+            }
+            Some(_) => return Err("bad_rich_text"),
+        };
         let style = match patch.get("style") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -164,6 +281,10 @@ impl CardBook {
         }
         if let Some(text) = patch["text"].as_str() {
             card.text = clip(text);
+            card.rtf = None;
+        }
+        if let Some(rtf) = rtf {
+            card.rtf = rtf;
         }
         if let Some(kind) = kind {
             card.kind = kind;
@@ -215,6 +336,93 @@ mod tests {
             Err("bad_kind")
         );
         assert_eq!(book, original);
+    }
+
+    #[test]
+    fn rich_text_round_trips_and_plain_text_edits_clear_formatting() {
+        let mut book = CardBook::default();
+        let id = book.add(CardKind::Note, "old", "t".into(), 0);
+        let rtf = r"{\rtf1\ansi {\b hello} {\i world}}";
+        book.update(id, &json!({"text": "hello world", "rtf": rtf})).unwrap();
+        book.update(id, &json!({"x": 10, "y": 20, "done": true, "style": {"padding": 8}})).unwrap();
+        assert_eq!(book.get(id).unwrap().rtf.as_deref(), Some(rtf));
+        let dir = std::env::temp_dir().join(format!("ll-cards-rtf-{}", std::process::id()));
+        let path = dir.join("cards.json");
+        book.save(&path).unwrap();
+        assert_eq!(CardBook::load(&path), book);
+
+        // Formatting-only changes keep the plain-text mirror, and metadata keeps formatting.
+        let changed = r"{\rtf1\ansi {\ul hello world}}";
+        book.update(id, &json!({"text": "hello world", "rtf": changed})).unwrap();
+        assert_eq!(book.get(id).unwrap().rtf.as_deref(), Some(changed));
+        book.update(id, &json!({"text": "edited in a plain-text client"})).unwrap();
+        assert_eq!(book.get(id).unwrap().rtf, None);
+        book.update(id, &json!({"text": "hello world", "rtf": changed})).unwrap();
+        book.update(id, &json!({"rtf": null})).unwrap();
+        assert_eq!(book.get(id).unwrap().rtf, None);
+        assert_eq!(book.get(id).unwrap().text, "hello world");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_cards_load_without_rich_text_and_damaged_formatting_keeps_plain_text() {
+        let old = r#"{"version":1,"nextId":1,"cards":[{"id":1,"text":"old note","visible":true}]}"#;
+        let book: CardBook = serde_json::from_str(old).unwrap();
+        assert_eq!(book.cards[0].rtf, None);
+        assert_eq!(book.cards[0].text, "old note");
+        assert!(serde_json::to_value(&book).unwrap()["cards"][0].get("rtf").is_none());
+
+        let dir = std::env::temp_dir().join(format!("ll-cards-rtf-recovery-{}", std::process::id()));
+        let path = dir.join("cards.json");
+        let mut damaged = book;
+        damaged.cards[0].rtf = Some(r"{\rtf1\object bad}".into());
+        damaged.save(&path).unwrap();
+        let recovered = CardBook::load(&path);
+        assert_eq!(recovered.cards[0].text, "old note");
+        assert_eq!(recovered.cards[0].rtf, None);
+        assert!(!path.with_extension("json.bad").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_or_oversized_rich_text_rejects_the_entire_patch() {
+        let mut book = CardBook::default();
+        let id = book.add(CardKind::Note, "original", "t".into(), 0);
+        let original = book.clone();
+        for patch in [
+            json!({"rtf": r"{\rtf1 missing plain text}", "done": true}),
+            json!({"rtf": 42, "text": "new", "style": {"padding": 12}}),
+            json!({"rtf": "not RTF", "text": "new", "done": true}),
+            json!({"rtf": r"{\rtf1 incomplete", "text": "new", "done": true}),
+            json!({"rtf": r"{\rtf1 valid} trailing content", "text": "new", "done": true}),
+            json!({"rtf": format!("{{\\rtf1 {}}}", "x".repeat(MAX_RTF_BYTES)), "text": "new", "done": true}),
+            json!({"rtf": r"{\rtf1 long text}", "text": "字".repeat(MAX_TEXT + 1), "done": true}),
+        ] {
+            assert_eq!(book.update(id, &patch), Err("bad_rich_text"));
+            assert_eq!(book, original);
+        }
+        // Count Unicode characters, not UTF-8 bytes, at the plain-text limit.
+        let text = "字".repeat(MAX_TEXT);
+        book.update(id, &json!({"text": text, "rtf": r"{\rtf1\ansi text}"})).unwrap();
+        assert_eq!(book.get(id).unwrap().text.chars().count(), MAX_TEXT);
+    }
+
+    #[test]
+    fn rich_text_rejects_embedded_content_but_allows_literal_control_names_and_links() {
+        for rtf in [
+            r"{\rtf1 {\object\objdata 0102}}",
+            r"{\rtf1 {\PICT 0102}}",
+            r"{\rtf1\bin2 xx}",
+            r"{\rtf1 {\*\filetbl {\file external}}}",
+            "{\\rtf1 nul\0}",
+        ] {
+            assert!(!valid_rtf(rtf, "text"), "rejected embedded content");
+        }
+        assert!(valid_rtf(r"{\rtf1 escaped \\object \{braces\}}", "escaped \\object {braces}"));
+        assert!(valid_rtf(
+            r#"{\rtf1 {\field{\*\fldinst{HYPERLINK "https://example.com"}}{\fldrslt{example}}}}"#,
+            "example"
+        ));
     }
 
     #[test]

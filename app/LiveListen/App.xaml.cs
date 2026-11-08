@@ -115,7 +115,7 @@ public partial class App : Application
             var text = Loc.Error(code == "stopped" ? code : "save_failed");
             if (settingsWindow is not null)
             {
-                settingsWindow.ShowIssue(text);
+                settingsWindow.ShowSettingsSaveFailure(code);
             }
             else
             {
@@ -368,7 +368,11 @@ public partial class App : Application
         {
             // Closing settings commits a card style being edited there. Card drafts must be
             // captured while their editors still exist. The UI remains free while writes finish.
-            settingsWindow?.Close();
+            if (settingsWindow is { } settings && !await settings.CloseAfterSavingAsync())
+            {
+                CancelExit(Loc.Error("save_failed"));
+                return;
+            }
             if (Cards is not null && !await Cards.FlushAsync())
             {
                 CancelExit(Loc.Error("card_save_failed"));
@@ -388,6 +392,7 @@ public partial class App : Application
                 CancelExit(Loc.Error(shutdown["error"].Str("card_save_failed")));
                 return;
             }
+            settingsWindow?.CloseHost();
             Cards?.CloseAll();
             captions?.Close();
             overlayMenu?.Dispose();

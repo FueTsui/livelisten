@@ -216,7 +216,7 @@ internal static unsafe partial class Win32
     public const int WH_KEYBOARD_LL = 13, WH_MOUSE_LL = 14, HC_ACTION = 0;
     public const uint WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
     public const uint WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207, WM_XBUTTONDOWN = 0x020B;
-    public const uint GA_ROOT = 2;
+    public const uint GA_ROOT = 2, GA_ROOTOWNER = 3;
 
     /// <summary>Marks input sent by the native core (`win/input.rs` MARKER).</summary>
     public const nuint CoreInputMarker = 0x4C4C_5354;

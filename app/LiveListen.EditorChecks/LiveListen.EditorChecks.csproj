@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="OutputPath">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RootNamespace>LiveListen.EditorChecks</RootNamespace>
+    <AssemblyName>LiveListen.EditorChecks</AssemblyName>
+    <ApplicationManifest>..\LiveListen\app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WinUISDKReferences>false</WinUISDKReferences>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepoRoot>
+    <LiveListenAssembly Condition="'$(LiveListenAssembly)' == ''">$(RepoRoot)\target\dotnet\bin\LiveListen\x64\Debug\net10.0-windows10.0.26100.0\win-x64\LiveListen.dll</LiveListenAssembly>
+    <!-- A versioned directory prevents older self-contained native binaries from
+         surviving a package downgrade through timestamp-based copy checks. -->
+    <EditorChecksOutputPath Condition="'$(EditorChecksOutputPath)' == ''">$(RepoRoot)\target\editor-checks\bin-sdk18\</EditorChecksOutputPath>
+    <OutputPath>$(EditorChecksOutputPath)</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <SatelliteResourceLanguages>en;zh-Hans</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <!-- The product is copied, never rebuilt or started. Reflection tests its real control. -->
+    <Content Include="$(LiveListenAssembly)" Link="LiveListen.dll" CopyToOutputDirectory="PreserveNewest" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="1.8.260804001" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="1.8.251216001" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="1.8.260708001" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="1.8.260803002" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="1.8.260803003" />
+  </ItemGroup>
+  <Target Name="RequireProductAssembly" BeforeTargets="Build">
+    <Error Condition="!Exists('$(LiveListenAssembly)')" Text="Build LiveListen first, or pass -p:LiveListenAssembly=the-absolute-path-to-LiveListen.dll." />
+  </Target>
+</Project>

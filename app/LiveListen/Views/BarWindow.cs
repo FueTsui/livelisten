@@ -319,20 +319,30 @@ internal sealed partial class BarWindow : Window
         {
             var dpi = Overlay.Scale(this);
             // The visual, rather than the large transparent HWND, selects its monitor.
-            var work = DisplayArea.GetFromPoint(new PointInt32((int)Math.Round(point.X), (int)Math.Round(point.Y)),
-                DisplayAreaFallback.Nearest).WorkArea;
-            ConstrainCaption(work, dpi);
+            var display = DisplayArea.GetFromPoint(new PointInt32((int)Math.Round(point.X), (int)Math.Round(point.Y)),
+                DisplayAreaFallback.Nearest);
+            var liveVisible = liveScroll.Visibility == Visibility.Visible;
+            // Live text can use the taskbar strip. Status-only text stays within the work area.
+            var bounds = liveVisible ? display.OuterBounds : display.WorkArea;
+            ConstrainCaption(bounds, dpi);
             captionHeight = captionPanel.Visibility == Visibility.Visible ? captionPanel.ActualHeight : 0;
-            var below = (work.Y + work.Height - point.Y) / dpi;
-            var above = (point.Y - work.Y) / dpi;
-            // Use the full zoom range for choosing a side, so wheel resizing cannot
-            // oscillate between above and below near the taskbar.
-            captionAbove = below < CaptionExtent * VoiceSizing.Maximum + textGap + captionHeight + 8 && above > below;
-            captionMinTop = (work.Y - AppWindow.Position.Y) / dpi + 8;
-            captionMaxTop = (work.Y + work.Height - AppWindow.Position.Y) / dpi - captionHeight - 8;
+            var below = (bounds.Y + bounds.Height - point.Y) / dpi;
+            var margin = liveVisible ? 0 : 8;
+            if (liveVisible)
+            {
+                var reach = CaptionExtent * CurrentScale + textGap + captionHeight;
+                captionAbove = VoiceSizing.LiveCaptionAbove(below, reach);
+            }
+            else
+            {
+                var above = (point.Y - bounds.Y) / dpi;
+                captionAbove = below < CaptionExtent * VoiceSizing.Maximum + textGap + captionHeight + margin && above > below;
+            }
+            captionMinTop = (bounds.Y - AppWindow.Position.Y) / dpi + margin;
+            captionMaxTop = (bounds.Y + bounds.Height - AppWindow.Position.Y) / dpi - captionHeight - margin;
             var left = (body.Width + 16 - captionPanel.ActualWidth) / 2;
-            var minLeft = (work.X - AppWindow.Position.X) / dpi + 8;
-            var maxLeft = (work.X + work.Width - AppWindow.Position.X) / dpi - captionPanel.ActualWidth - 8;
+            var minLeft = (bounds.X - AppWindow.Position.X) / dpi + 8;
+            var maxLeft = (bounds.X + bounds.Width - AppWindow.Position.X) / dpi - captionPanel.ActualWidth - 8;
             captionMotion.X = Math.Clamp(left, minLeft, Math.Max(minLeft, maxLeft)) - left;
         }
         if (zoomAnimation is null) ApplyScale(voiceScale);
@@ -340,14 +350,13 @@ internal sealed partial class BarWindow : Window
             SetScaleTarget(targetScale, true);
     }
 
-    private void ConstrainCaption(RectInt32 work, double dpi)
+    private void ConstrainCaption(RectInt32 bounds, double dpi)
     {
-        var width = Math.Min(PanelWidth, Math.Max(1, work.Width / dpi - 16));
-        var height = Math.Max(1, work.Height / dpi - 16);
+        var width = Math.Min(PanelWidth, Math.Max(1, bounds.Width / dpi - 16));
+        var height = Math.Max(1, bounds.Height / dpi - 16);
         if (captionPanel.Width == width && captionViewport.MaxHeight == height) return;
         captionPanel.Width = width;
-        // An unusually small work area with large type/padding must still allow
-        // scrolling to every line, rather than paint text underneath the taskbar.
+        // Keep every line scrollable even with large type on a small display.
         captionViewport.MaxHeight = height;
         root.UpdateLayout();
     }
@@ -397,7 +406,8 @@ internal sealed partial class BarWindow : Window
         zoomAnimation?.Stop();
         zoomAnimation = null;
         voiceScale = targetScale;
-        ApplyScale(voiceScale);
+        if (liveScroll.Visibility == Visibility.Visible) PlaceCaption();
+        else ApplyScale(voiceScale);
         UpdateHitRegion();
         settings.Set(voice.IsRibbon ? "appearance.ribbonScale" : "appearance.voiceScale", voiceScale);
         SavePosition(AppWindow.Position);

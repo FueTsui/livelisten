@@ -1,7 +1,9 @@
 using System.Text.Json.Nodes;
+using System.Globalization;
 using LiveListen.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace LiveListen.Views;
@@ -69,9 +71,11 @@ internal sealed partial class SettingsWindow
 
     private void BuildSharedCardStyle(ComboBox target)
     {
-        BuildStyleEditor("cards", SettingsTarget("cards"), T("look.reset"), () => ResetSurface("cards"), () =>
+        var editor = SettingsTarget("cards");
+        BuildStyleEditor("cards", editor, T("look.reset"), () => ResetSurface("cards"), () =>
         {
             Card(T("look.cards.target"), null, target);
+            BuildCardHeaderInfo(editor);
             var clear = ActionButton(T("look.cards.clear"), ClearCardStyles);
             Card(T("look.cards.own.title"), "", clear, null, out var count);
             void Count()
@@ -123,6 +127,7 @@ internal sealed partial class SettingsWindow
         }, () =>
         {
             Card(T("look.cards.target"), null, target);
+            BuildCardHeaderInfo(editor);
             page.Children.Add(Note(T(own ? "look.card.own" : "look.card.shared")));
         });
         pageEvents = (name, _) =>
@@ -140,6 +145,69 @@ internal sealed partial class SettingsWindow
 
     private JsonObject SharedCardStyle() => s.Get("appearance.cards") as JsonObject ?? new JsonObject();
 
+    private void BuildCardHeaderInfo(StyleTarget target)
+    {
+        var selected = CardHeaderInfo.Mode(target.Get("cardHeader").Str());
+        var modes = new ComboBox { MinWidth = 220 };
+        foreach (var mode in CardHeaderInfo.Modes)
+            modes.Items.Add(new ComboBoxItem { Content = T("look.cards.header." + mode), Tag = mode });
+        modes.SelectedIndex = Array.IndexOf(CardHeaderInfo.Modes, selected);
+        AutomationProperties.SetName(modes, T("look.cards.header"));
+        Card(T("look.cards.header"), null, modes);
+
+        var date = new CalendarDatePicker
+        {
+            MinWidth = 180, PlaceholderText = T("look.cards.headerDate.auto"),
+            MinDate = new DateTimeOffset(1, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            MaxDate = new DateTimeOffset(9999, 12, 31, 0, 0, 0, TimeSpan.Zero),
+        };
+        if (CardHeaderInfo.ParseDate(target.Get("cardHeaderDate").Str()) is { } stored)
+            date.Date = new DateTimeOffset(stored.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        AutomationProperties.SetName(date, T("look.cards.headerDate"));
+        var reset = new Button { Content = T("look.cards.headerDate.reset") };
+        reset.IsEnabled = date.Date.HasValue;
+        date.DateChanged += (_, _) =>
+        {
+            var value = date.Date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
+            if (value != target.Get("cardHeaderDate").Str()) target.Set("cardHeaderDate", value);
+            reset.IsEnabled = date.Date.HasValue;
+        };
+        reset.Click += (_, _) => date.Date = null;
+        var dateRow = Card(T("look.cards.headerDate"), T("look.cards.headerDate.desc"), Horizontal(date, reset));
+
+        var title = new TextBox
+        {
+            Text = target.Get("cardHeaderTitle").Str(), Width = 280,
+            PlaceholderText = T("look.cards.headerTitle.auto"), AcceptsReturn = false,
+        };
+        AutomationProperties.SetName(title, T("look.cards.headerTitle"));
+        title.TextChanged += (_, _) =>
+        {
+            var clean = CardHeaderInfo.CleanTitle(title.Text);
+            if (clean != title.Text)
+            {
+                var cursor = Math.Min(title.SelectionStart, clean.Length);
+                title.Text = clean;
+                title.SelectionStart = cursor;
+            }
+            if (clean != target.Get("cardHeaderTitle").Str()) target.Set("cardHeaderTitle", clean);
+        };
+        var titleRow = Card(T("look.cards.headerTitle"), T("look.cards.headerTitle.desc"), title);
+        void ShowFields()
+        {
+            dateRow.Visibility = CardHeaderInfo.UsesDate(selected) ? Visibility.Visible : Visibility.Collapsed;
+            titleRow.Visibility = CardHeaderInfo.UsesTitle(selected) ? Visibility.Visible : Visibility.Collapsed;
+        }
+        modes.SelectionChanged += (_, _) =>
+        {
+            if (modes.SelectedItem is not ComboBoxItem { Tag: string mode } || mode == selected) return;
+            selected = mode;
+            target.Set("cardHeader", mode);
+            ShowFields();
+        };
+        ShowFields();
+    }
+
     private void QueueCardStyle()
     {
         cardStylePending = true;
@@ -148,10 +216,20 @@ internal sealed partial class SettingsWindow
             cardStyleTimer = DispatcherQueue.CreateTimer();
             cardStyleTimer.Interval = TimeSpan.FromMilliseconds(300);
             cardStyleTimer.IsRepeating = false;
-            cardStyleTimer.Tick += (_, _) => FlushCardStyle();
+            cardStyleTimer.Tick += OnCardStyleTick;
         }
         cardStyleTimer.Stop();
         cardStyleTimer.Start();
+    }
+
+    private void OnCardStyleTick(DispatcherQueueTimer sender, object args) => FlushCardStyle();
+
+    private void ReleaseCardStyleTimer()
+    {
+        if (cardStyleTimer is not { } timer) return;
+        timer.Stop();
+        timer.Tick -= OnCardStyleTick;
+        cardStyleTimer = null;
     }
 
     /// <summary>Saves a card style that is still waiting for the editing pause.</summary>

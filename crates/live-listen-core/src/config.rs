@@ -12,8 +12,9 @@ use crate::hotkey::Binding;
 
 /// Current settings schema version. Version 2 removed translation, conversation records,
 /// summaries and voiceprints (see [`Settings::removed_secrets`]); version 3 replaced the
-/// preconnect switch with [`Preconnect`] levels.
-pub const SETTINGS_VERSION: u32 = 3;
+/// preconnect switch with [`Preconnect`] levels; version 4 changes the uncustomized
+/// spoken-note shortcut to a lone right Alt tap.
+pub const SETTINGS_VERSION: u32 = 4;
 
 /// Built-in speech provider identifier.
 pub const DOUBAO_ID: &str = "doubao";
@@ -21,6 +22,7 @@ pub const DOUBAO_ID: &str = "doubao";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
     pub version: u32,
     pub dictation: DictationSettings,
     pub captions: CaptionSettings,
@@ -161,7 +163,7 @@ impl Default for HotkeySettings {
             hold: "RCtrl".into(),
             toggle: "Ctrl+Alt+Space".into(),
             captions: "Ctrl+Alt+C".into(),
-            note: "Ctrl+Alt+N".into(),
+            note: "RAlt".into(),
             cards: "Ctrl+Alt+K".into(),
         }
     }
@@ -249,6 +251,12 @@ pub struct SurfaceStyle {
     pub corner_radius: f32,
     pub shadow: Shadow,
     pub padding: f32,
+    /// Desktop-card header layout; other surfaces retain but do not display these fields.
+    pub card_header: String,
+    /// Optional display date (YYYY-MM-DD), independent of the card's creation timestamp.
+    pub card_header_date: String,
+    /// Empty uses the localized card kind; otherwise a bounded single-line title.
+    pub card_header_title: String,
 }
 
 impl Default for SurfaceStyle {
@@ -260,6 +268,9 @@ impl Default for SurfaceStyle {
             corner_radius: 8.0,
             shadow: Shadow::Soft,
             padding: 12.0,
+            card_header: "yearMonthDay".into(),
+            card_header_date: String::new(),
+            card_header_title: String::new(),
         }
     }
 }
@@ -275,6 +286,34 @@ impl SurfaceStyle {
         let mut issues = Vec::new();
         self.corner_radius = finite_or(self.corner_radius, 8.0).clamp(0.0, 32.0);
         self.padding = finite_or(self.padding, 12.0).clamp(0.0, 48.0);
+        if !matches!(
+            self.card_header.as_str(),
+            "none"
+                | "yearMonthDay"
+                | "monthDay"
+                | "monthDayTime"
+                | "monthDayWeekday"
+                | "monthDayTitle"
+                | "weekdayTitle"
+                | "title"
+        ) {
+            issues.push(Issue { field: format!("{name}.cardHeader"), code: "invalid".into() });
+            self.card_header = "yearMonthDay".into();
+        }
+        if !self.card_header_date.is_empty() && !valid_header_date(&self.card_header_date) {
+            issues.push(Issue { field: format!("{name}.cardHeaderDate"), code: "invalid".into() });
+            self.card_header_date.clear();
+        }
+        self.card_header_title = self
+            .card_header_title
+            .chars()
+            .filter_map(|c| match c {
+                '\r' | '\n' | '\t' => Some(' '),
+                c if c.is_control() => None,
+                c => Some(c),
+            })
+            .take(80)
+            .collect();
         for (key, color) in
             [("text", &mut self.text), ("background", &mut self.background), ("border", &mut self.border)]
         {
@@ -295,8 +334,31 @@ impl SurfaceStyle {
             corner_radius: 8.0,
             shadow: Shadow::None,
             padding: 12.0,
+            ..Self::default()
         }
     }
+}
+
+fn valid_header_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes.iter().enumerate().any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = value[..4].parse::<u32>().unwrap_or(0);
+    let month = value[5..7].parse::<u32>().unwrap_or(0);
+    let day = value[8..].parse::<u32>().unwrap_or(0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || year % 4 == 0 && year % 100 != 0 => 29,
+        2 => 28,
+        _ => 0,
+    };
+    year > 0 && day > 0 && day <= last
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -391,6 +453,19 @@ impl Settings {
     /// Clamps numbers, fills empty required values and reports invalid entries.
     pub fn sanitize(&mut self) -> Vec<Issue> {
         let mut issues = Vec::new();
+        // Preserve custom/disabled bindings and an existing RAlt assignment. Schema 4
+        // distinguishes migration from a later deliberate choice of the former default.
+        let right_alt = Binding::parse("RAlt").ok();
+        if self.version < 4
+            && Binding::parse(&self.hotkeys.note).ok() == Binding::parse("Ctrl+Alt+N").ok()
+            && !self
+                .hotkeys
+                .fields()
+                .iter()
+                .any(|(field, value)| *field != "note" && Binding::parse(value).ok() == right_alt)
+        {
+            self.hotkeys.note = "RAlt".into();
+        }
         self.version = SETTINGS_VERSION;
         let defaults = HotkeySettings::default();
         let mut seen: Vec<Binding> = Vec::new();
@@ -553,6 +628,134 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"dictation":{"writeMode":"live"}}"#).unwrap();
         assert_eq!(settings.dictation.write_mode, WriteMode::Live);
         assert_eq!(settings.hotkeys, HotkeySettings::default());
+    }
+
+    #[test]
+    fn note_hotkey_migration_preserves_custom_disabled_and_conflicting_bindings() {
+        assert_eq!(HotkeySettings::default().note, "RAlt");
+        for (raw, expected) in [
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "RAlt"),
+            (r#"{"version":3,"hotkeys":{"note":"ctrl + alt + n"}}"#, "RAlt"),
+            (r#"{"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "RAlt"),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+M"}}"#, "Ctrl+Alt+M"),
+            (r#"{"version":3,"hotkeys":{"note":""}}"#, ""),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N","hold":"RAlt"}}"#, "Ctrl+Alt+N"),
+            (r#"{"version":4,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Alt+N"),
+        ] {
+            let mut settings: Settings = serde_json::from_str(raw).unwrap();
+            assert!(settings.sanitize().is_empty(), "{raw}");
+            assert_eq!(settings.version, 4);
+            assert_eq!(settings.hotkeys.note, expected, "{raw}");
+            let mut restored: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert!(restored.sanitize().is_empty());
+            assert_eq!(restored, settings, "migration is idempotent");
+        }
+    }
+
+    #[test]
+    fn backspace_shortcut_survives_save_reload_and_sanitize() {
+        let dir = std::env::temp_dir().join(format!("ll-config-backspace-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut settings = Settings::default();
+        settings.hotkeys.cards = "Backspace".into();
+        settings.hotkeys.captions.clear();
+        assert!(settings.sanitize().is_empty());
+        settings.save(&path).unwrap();
+        let mut reloaded = Settings::load(&path);
+        assert_eq!(reloaded.hotkeys.cards, "Backspace");
+        assert_eq!(reloaded.hotkeys.note, "RAlt");
+        assert!(reloaded.hotkeys.captions.is_empty());
+        assert!(reloaded.sanitize().is_empty());
+        reloaded.save(&path).unwrap();
+        assert_eq!(Settings::load(&path), settings);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_header_defaults_and_all_modes_round_trip() {
+        let legacy: SurfaceStyle = serde_json::from_str(r#"{"padding":8}"#).unwrap();
+        assert_eq!(legacy.card_header, "yearMonthDay");
+        assert!(legacy.card_header_date.is_empty());
+        assert!(legacy.card_header_title.is_empty());
+        for mode in [
+            "none",
+            "yearMonthDay",
+            "monthDay",
+            "monthDayTime",
+            "monthDayWeekday",
+            "monthDayTitle",
+            "weekdayTitle",
+            "title",
+        ] {
+            let mut settings = Settings::default();
+            settings.appearance.cards.card_header = mode.into();
+            settings.appearance.cards.card_header_date = "2028-02-29".into();
+            settings.appearance.cards.card_header_title = "读书 📖".into();
+            assert!(settings.sanitize().is_empty());
+            let saved = serde_json::to_string(&settings).unwrap();
+            let restored: Settings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored, settings);
+            assert_eq!(restored.appearance.bar, SurfaceStyle::bar_default());
+            assert_eq!(restored.appearance.captions, SurfaceStyle::captions_default());
+        }
+    }
+
+    #[test]
+    fn card_header_rejects_invalid_dates_and_bounds_unicode_titles() {
+        for date in [
+            "2026-02-29",
+            "1900-02-29",
+            "2026-04-31",
+            "2026-00-01",
+            "2026-11-00",
+            "0000-01-01",
+            "2026-1-01",
+            "not-a-date",
+        ] {
+            let mut style = SurfaceStyle { card_header_date: date.into(), ..SurfaceStyle::default() };
+            assert!(style.sanitize("cards").iter().any(|i| i.field == "cards.cardHeaderDate"), "{date}");
+            assert!(style.card_header_date.is_empty());
+        }
+        for date in ["0001-01-01", "2000-02-29", "2028-02-29", "9999-12-31"] {
+            assert!(valid_header_date(date), "{date}");
+        }
+        let mut style = SurfaceStyle {
+            card_header: "invalid".into(),
+            card_header_title: format!("A\nB\t{}\0", "🦀".repeat(90)),
+            ..SurfaceStyle::default()
+        };
+        assert!(style.sanitize("cards").iter().any(|i| i.field == "cards.cardHeader"));
+        assert_eq!(style.card_header, "yearMonthDay");
+        assert_eq!(style.card_header_title.chars().count(), 80);
+        assert!(style.card_header_title.starts_with("A B "));
+        assert!(style.card_header_title.chars().all(|c| !c.is_control()));
+    }
+
+    #[test]
+    fn card_header_override_survives_reload_without_changing_note_dates() {
+        use crate::cards::{CardBook, CardKind};
+        let mut book = CardBook::default();
+        let id = book.add(CardKind::Todo, "买牛奶", "2026-11-08T12:30:00Z".into(), 1_783_600_000_000);
+        let original = book.get(id).unwrap().clone();
+        book.update(
+            id,
+            &serde_json::json!({"style": {
+                "cardHeader": "weekdayTitle", "cardHeaderDate": "2028-02-29", "cardHeaderTitle": "采购"
+            }}),
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("ll-config-card-header-{}", std::process::id()));
+        let path = dir.join("cards.json");
+        book.save(&path).unwrap();
+        let mut restored = CardBook::load(&path);
+        let card = restored.get(id).unwrap();
+        assert_eq!(card.text, original.text);
+        assert_eq!((card.created.as_str(), card.created_ms), (original.created.as_str(), original.created_ms));
+        assert_eq!(card.style.as_ref().unwrap().card_header_title, "采购");
+        assert_eq!(card.style.as_ref().unwrap().card_header_date, "2028-02-29");
+        restored.update(id, &serde_json::json!({"style": null})).unwrap();
+        assert!(restored.get(id).unwrap().style.is_none(), "use shared removes all own header fields");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

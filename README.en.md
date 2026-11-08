@@ -39,7 +39,7 @@ Download `LiveListen-Setup-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub 
 1. Compare the following SHA-256 value with the matching entry in `SHA256SUMS.txt`.
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.0-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer and choose **Install now**. The default path is `%LOCALAPPDATA%\Programs\LiveListen`. Custom options let you change the folder, shortcuts, startup, and whether to launch after installation.
@@ -58,10 +58,10 @@ Open **Settings** from the tray, select a microphone and speech provider, then p
 | Hold right <kbd>Ctrl</kbd> | Dictate into the active text field. Release to finish. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | Start or stop continuous dictation. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle live captions. |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | Record a voice note. |
+| Tap right <kbd>Alt</kbd> | Record a voice note on release. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | Show or hide desktop cards. |
 
-Customize the shortcuts in Settings. A single click on the tray icon shows or hides the voice overlay. In the tray context menu, **Show dictation** controls the same setting as **Show live text in the bar**.
+Click a shortcut field in Settings and press the new key or combination; releasing the keys saves it. Escape or moving focus cancels recording, and the clear button disables that action's shortcut. A single click on the tray icon shows or hides the voice overlay. In the tray context menu, **Show dictation** controls the same setting as **Show live text in the bar**.
 
 ### Speech providers
 
@@ -97,7 +97,7 @@ Preconnection can authenticate with the provider before dictation begins. Audio 
 | Provider credentials | Windows Credential Manager. LiveListen supplies them to the relevant recognition process at startup. |
 | Diagnostic logs | `%LOCALAPPDATA%\LiveListen\Logs`. Local events, error codes, and lengths only. |
 | Installer logs | `%TEMP%\LiveListen-Setup-<timestamp>.log` or `LiveListen-Uninstall-<timestamp>.log` |
-| Update check | Opens the GitHub Releases page when requested. Updates are downloaded and installed manually. |
+| Update check | Shows the new version in General settings and automatically downloads the matching package. After verification, open its download folder and start installation yourself. |
 
 See the [security policy](SECURITY.md) for more detail.
 

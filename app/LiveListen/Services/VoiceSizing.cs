@@ -19,4 +19,7 @@ internal static class VoiceSizing
 
     public static double Advance(double current, double target, double seconds) =>
         current + Math.Sign(target - current) * Math.Min(Math.Abs(target - current), Speed * Math.Max(0, seconds));
+
+    // The lower lane wins whenever the live text still fits, including at the edge.
+    public static bool LiveCaptionAbove(double roomBelow, double reach) => roomBelow < reach;
 }

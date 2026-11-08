@@ -2158,6 +2158,28 @@ impl Core {
                 }
                 None => Err("hook_unavailable".into()),
             },
+            "hotkey.capture" => {
+                let on = request["on"].as_bool().ok_or("capture_invalid_request")?;
+                let window = if on {
+                    request["window"]
+                        .as_i64()
+                        .and_then(|window| isize::try_from(window).ok())
+                        .filter(|&window| window != 0)
+                        .ok_or("capture_invalid_request")?
+                } else {
+                    0
+                };
+                let token = if on {
+                    0
+                } else {
+                    request["token"].as_u64().filter(|&token| token != 0).ok_or("capture_invalid_request")?
+                };
+                if on && self.dictation.is_some() {
+                    return Err("capture_busy".into());
+                }
+                let reply = self.hook.as_ref().ok_or("capture_unavailable")?.capture(on, window, token)?;
+                Ok(json!({"active": reply.active, "token": reply.token}))
+            }
             "hotkey.check" => {
                 let binding = request["binding"].as_str().unwrap_or("");
                 Ok(self.check_hotkey(binding, request["field"].as_str().unwrap_or("")))
@@ -2379,7 +2401,7 @@ impl Core {
         let Ok(binding) = Binding::parse(text) else {
             return json!({"valid": false, "conflict": null});
         };
-        if binding.is_modifier_only() && field != "hold" {
+        if binding.is_modifier_only() && !matches!(field, "hold" | "note") {
             return json!({"valid": false, "display": binding.to_string(), "conflict": "modifier_only"});
         }
         let duplicate =
@@ -2811,7 +2833,23 @@ for line in sys.stdin:
         assert_eq!(lone["conflict"], "modifier_only");
         let hold = call(&engine, json!({"cmd": "hotkey.check", "binding": "RAlt", "field": "hold"}));
         assert_eq!(hold["valid"], true);
+        assert_eq!(hold["conflict"], "duplicate");
+        let note = call(&engine, json!({"cmd": "hotkey.check", "binding": "rightalt", "field": "note"}));
+        assert_eq!(note["valid"], true);
+        assert_eq!(note["display"], "RAlt");
+        assert!(note["conflict"].is_null());
         assert_eq!(call(&engine, json!({"cmd": "hotkey.record"}))["error"], "hook_unavailable");
+        for request in [
+            json!({"cmd": "hotkey.capture"}),
+            json!({"cmd": "hotkey.capture", "on": true, "window": 0}),
+            json!({"cmd": "hotkey.capture", "on": false}),
+        ] {
+            assert_eq!(call(&engine, request)["error"], "capture_invalid_request");
+        }
+        assert_eq!(
+            call(&engine, json!({"cmd": "hotkey.capture", "on": true, "window": 42}))["error"],
+            "capture_unavailable"
+        );
         drop(engine);
         let _ = std::fs::remove_dir_all(&dir);
     }

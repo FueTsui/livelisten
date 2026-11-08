@@ -8,7 +8,7 @@
 
 说话即写入当前输入框；电脑里播放的声音实时变成字幕；一句话记成桌面卡片。
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.1.1-blue)
 [![GitHub Release](https://img.shields.io/github/v/release/FueTsui/livelisten)](https://github.com/FueTsui/livelisten/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -48,7 +48,7 @@
 1. **先核对校验值**：
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.0-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
    ```
 
    结果应与 `SHA256SUMS.txt` 中对应行一致；不一致时不要运行。
@@ -72,10 +72,10 @@
 | 按住右 <kbd>Ctrl</kbd> | 听写：说话写入当前输入框，松开结束 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | 开始或结束持续听写 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | 开关实时字幕 |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | 记一句随手记 |
+| 轻按右 <kbd>Alt</kbd> | 记一句随手记，松开触发 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | 显示或隐藏卡片 |
 
-- 快捷键都可在设置中修改。
+- 快捷键可在设置中直接点击键值输入框录入，松开按键后保存；按 Esc 或移开焦点取消，输入框右侧的清除按钮可禁用该项。
 - 单击托盘图标显示或隐藏浮条。右键菜单的「显示听写」与听写设置中的「浮条显示实时文字」同步。
 - 服务的「检查」只检查本地配置和桥接进程能否启动，不代表云端鉴权或识别一定成功。
 
@@ -117,7 +117,7 @@
 | 官方服务凭据 | Windows 凭据管理器；只在启动对应识别进程时传入，不写入命令行或日志 |
 | 诊断日志 | `%LOCALAPPDATA%\LiveListen\Logs`；不上传，只记录事件、错误码和长度，不记录识别文字或按键 |
 | 安装日志 | `%TEMP%\LiveListen-Setup-<时间>.log` / `LiveListen-Uninstall-<时间>.log` |
-| 检查更新 | 可手动打开 GitHub 发布页查看版本，不自动下载或安装 |
+| 检查更新 | 在设置「通用」中显示新版本并自动下载适用的更新包；校验通过后可打开下载位置，安装由用户启动 |
 
 更多见 [SECURITY.md](SECURITY.md)。
 

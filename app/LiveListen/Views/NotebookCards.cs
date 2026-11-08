@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json.Nodes;
+using LiveListen.Controls;
 using LiveListen.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -12,14 +14,21 @@ internal sealed partial class NotebookView
     private StackPanel cardsPanel = null!;
     private ToggleSwitch desktopSwitch = null!;
     private TextBlock cardsStatus = null!;
+    private TextBlock markdownStatus = null!;
+    private TextBlock shortcutHint = null!;
     private bool cardsPending;
     private bool displayedCards;
+    private static readonly string[] rowFields = ["id", "kind", "text", "rtf", "done", "archived", "created", "createdMs"];
+    private List<JsonObject> renderedCards = [];
+    private string? renderedFilter;
+    private readonly Dictionary<ulong, Action<bool>> rowVisibility = [];
 
     private void BuildCards()
     {
         var page = new StackPanel { Spacing = 4, MaxWidth = 1000, Padding = new Thickness(36, 8, 36, 36) };
-        var keys = app.Settings.Str("hotkeys.note");
-        page.Children.Add(Secondary(keys.Length > 0 ? Loc.F("cards.desc.key", Theme.Keys(keys)) : T("cards.desc")));
+        shortcutHint = Secondary();
+        RefreshShortcutHint();
+        page.Children.Add(shortcutHint);
 
         displayedCards = app.Cards.Shown;
         desktopSwitch = new ToggleSwitch { IsOn = displayedCards, MinWidth = 0, OnContent = T("cards.desktop"), OffContent = T("cards.desktop") };
@@ -47,7 +56,12 @@ internal sealed partial class NotebookView
         var addPanel = new StackPanel { Spacing = 12 };
         addPanel.Children.Add(newText);
         addPanel.Children.Add(newKind);
-        var addFlyout = new Flyout { Content = addPanel };
+        var addFlyout = new Flyout
+        {
+            Content = addPanel,
+            ShowMode = Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowMode.Standard,
+            AllowFocusOnInteraction = true,
+        };
         var create = new Button { Content = T("common.add"), Style = Res<Style>("AccentButtonStyle") };
         var creating = false;
         create.Click += async (_, _) =>
@@ -58,6 +72,11 @@ internal sealed partial class NotebookView
             {
                 return;
             }
+            if (text.EnumerateRunes().Count() > 4000)
+            {
+                cardsStatus.Text = Loc.Error("text_too_long");
+                return;
+            }
             var kind = newKind.SelectedIndex == 1 ? "todo" : "note";
             creating = true;
             create.IsEnabled = false;
@@ -65,7 +84,7 @@ internal sealed partial class NotebookView
             {
                 var reply = await app.Engine.CallAsync("cards.add", new JsonObject { ["text"] = text, ["kind"] = kind });
                 if (closed) return;
-                if (reply.Ok() || reply["error"].Str() == "card_save_failed")
+                if (reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed")
                 {
                     // The core owns accepted edits even when its disk retry is pending.
                     // Do not erase text the user changed while this request was running.
@@ -85,10 +104,12 @@ internal sealed partial class NotebookView
             }
         };
         addPanel.Children.Add(create);
+        addFlyout.Opening += (_, _) => newCardFlyoutOpen = true;
         addFlyout.Opened += (_, _) => newText.Focus(FocusState.Programmatic);
         addFlyout.Closed += (_, _) =>
         {
-            if (!closed && cardsPending && !Editing()) FillCards();
+            newCardFlyoutOpen = false;
+            QueueCardsRefresh();
         };
         var add = new Button
         {
@@ -110,16 +131,38 @@ internal sealed partial class NotebookView
                 filter.SelectedItem = item;
             }
         }
-        filter.SelectionChanged += (sender, _) =>
+        var switchingFilter = false;
+        filter.SelectionChanged += async (sender, _) =>
         {
+            if (switchingFilter) return;
             if (sender.SelectedItem is { Tag: string tag } && tag != cardFilter)
             {
-                cardFilter = tag;
-                FillCards();
+                switchingFilter = true;
+                try
+                {
+                    sender.SelectedItem = sender.Items.First(item => item.Tag as string == cardFilter);
+                    if (!await FlushAsync() || closed) return;
+                    cardFilter = tag;
+                    sender.SelectedItem = sender.Items.First(item => item.Tag as string == tag);
+                    FillCards();
+                }
+                finally { switchingFilter = false; }
             }
         };
         tools.Children.Add(filter);
-        var right = Horizontal(desktopSwitch, add);
+        var openFolder = new Button { Content = T("cards.openFolder") };
+        openFolder.Click += (_, _) =>
+        {
+            try
+            {
+                var folder = System.IO.Path.Combine(app.ConfigDir, "随手记");
+                if (System.IO.Directory.Exists(folder))
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true });
+                else cardsStatus.Text = Loc.Error("card_markdown_failed");
+            }
+            catch (Exception) { cardsStatus.Text = Loc.Error("card_markdown_failed"); }
+        };
+        var right = Horizontal(desktopSwitch, openFolder, add);
         right.Spacing = 16;
         right.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(right, 1);
@@ -128,6 +171,9 @@ internal sealed partial class NotebookView
 
         cardsStatus = Secondary();
         page.Children.Add(cardsStatus);
+        markdownStatus = Secondary(app.Cards.MarkdownError.Length > 0 ? Loc.Error(app.Cards.MarkdownError) : "");
+        markdownStatus.Visibility = app.Cards.MarkdownError.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        page.Children.Add(markdownStatus);
         cardsPanel = new StackPanel { Spacing = 4 };
         page.Children.Add(cardsPanel);
         pageHost.Children.Add(new ScrollViewer { Content = page, HorizontalScrollMode = ScrollMode.Disabled });
@@ -140,6 +186,8 @@ internal sealed partial class NotebookView
             }
             displayedCards = app.Cards.Shown;
             desktopSwitch.IsOn = displayedCards;
+            markdownStatus.Text = app.Cards.MarkdownError.Length > 0 ? Loc.Error(app.Cards.MarkdownError) : "";
+            markdownStatus.Visibility = app.Cards.MarkdownError.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             if (Editing())
             {
                 cardsPending = true;
@@ -152,11 +200,18 @@ internal sealed partial class NotebookView
         FillCards();
     }
 
+    public void RefreshShortcutHint()
+    {
+        if (closed || shortcutHint is null) return;
+        var keys = app.Settings.Str("hotkeys.note");
+        shortcutHint.Text = keys.Length > 0 ? Loc.F("cards.desc.key", Theme.Keys(keys)) : T("cards.desc");
+    }
+
     private void FillCards()
     {
         if (closed) return;
+        if (Editing()) { cardsPending = true; return; }
         cardsPending = false;
-        cardsPanel.Children.Clear();
         var cards = app.Cards.Cards
             .Where(c => cardFilter switch
             {
@@ -166,6 +221,22 @@ internal sealed partial class NotebookView
             })
             .OrderByDescending(c => c["createdMs"].Num())
             .ToList();
+        // Desktop movement, title settings and global visibility can update the
+        // card book without changing any of the editable rows.
+        if (renderedFilter == cardFilter && cards.Count == renderedCards.Count
+            && cards.Zip(renderedCards).All(pair => rowFields.All(key => JsonNode.DeepEquals(pair.First[key], pair.Second[key]))))
+        {
+            foreach (var card in cards)
+                if (rowVisibility.TryGetValue((ulong)card["id"].Num(), out var update))
+                    update(card["visible"].Bool());
+            return;
+        }
+        renderedFilter = cardFilter;
+        renderedCards = cards;
+        cardsPanel.Children.Clear();
+        cardEditors.Clear();
+        cardFlushers.Clear();
+        rowVisibility.Clear();
         if (cards.Count == 0)
         {
             cardsPanel.Children.Add(Secondary(T("cards.none." + cardFilter)));
@@ -181,7 +252,71 @@ internal sealed partial class NotebookView
         var id = (ulong)card["id"].Num();
         var todo = card["kind"].Str() == "todo";
         var archived = card["archived"].Bool();
-        void Patch(JsonObject patch) => _ = PatchCard(id, patch);
+        var text = new NoteEditor();
+        text.Apply(Theme.CardLook(app.Settings.Str("appearance.theme", "system"), _ => null));
+        text.Load(card["text"].Str(), card["rtf"]?.GetValue<string>());
+        cardEditors.Add(text);
+        var savedContent = text.GetContent();
+        var pending = new Dictionary<string, (long Revision, JsonNode? Value)>();
+        long revision = 0;
+        Task writes = Task.CompletedTask;
+        async Task SaveAfter(Task previous, JsonObject patch, long sentRevision, (string Text, string Rtf)? sentContent)
+        {
+            await previous;
+            try
+            {
+                var reply = await app.Engine.CallAsync("cards.update", new JsonObject { ["id"] = id, ["patch"] = patch });
+                if (reply.Ok() || reply["error"].Str() is "card_save_failed" or "card_markdown_failed")
+                {
+                    if (sentContent is { } acceptedContent) savedContent = acceptedContent;
+                    foreach (var key in pending.Where(pair => pair.Value.Revision <= sentRevision).Select(pair => pair.Key).ToArray())
+                        pending.Remove(key);
+                    if (pending.Count == 0) dirtyEditors.Remove(text);
+                }
+                if (!closed) cardsStatus.Text = reply.Ok() ? "" : Loc.Error(reply["error"].Str("save_failed"));
+            }
+            catch (Exception) { if (!closed) cardsStatus.Text = Loc.Error("save_failed"); }
+            QueueCardsRefresh();
+        }
+        void Patch(JsonObject patch)
+        {
+            if (!text.TryGetContent(out var content))
+            {
+                cardsStatus.Text = Loc.Error("bad_rich_text");
+                return;
+            }
+            var plannedContent = pending.TryGetValue("text", out var queuedText) && pending.TryGetValue("rtf", out var queuedRtf)
+                ? (queuedText.Value?.GetValue<string>() ?? "", queuedRtf.Value?.GetValue<string>() ?? "") : savedContent;
+            if (content.Text.Length > 0 && content != plannedContent)
+            {
+                patch["text"] = content.Text;
+                patch["rtf"] = content.Rtf;
+            }
+            if (patch.Count == 0 && !writes.IsCompleted) return;
+            foreach (var (key, field) in pending)
+                if (!patch.ContainsKey(key)) patch[key] = field.Value?.DeepClone();
+            if (patch.Count == 0) return;
+            var sentRevision = ++revision;
+            foreach (var field in patch) pending[field.Key] = (sentRevision, field.Value?.DeepClone());
+            dirtyEditors.Add(text);
+            (string Text, string Rtf)? sentContent = patch.ContainsKey("text")
+                ? (patch["text"].Str(), patch["rtf"].Str()) : null;
+            writes = SaveAfter(writes, patch, sentRevision, sentContent);
+            app.Cards.Track(writes);
+        }
+        cardFlushers.Add(async () =>
+        {
+            if (!text.CanSave) return false;
+            text.FinishEditing();
+            Patch(new JsonObject());
+            await writes;
+            if (pending.Count > 0)
+            {
+                Patch(new JsonObject());
+                await writes;
+            }
+            return pending.Count == 0;
+        });
 
         var grid = new Grid { ColumnSpacing = 12 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -203,47 +338,37 @@ internal sealed partial class NotebookView
         grid.Children.Add(done);
 
         var stack = new StackPanel { Spacing = 4 };
-        var text = new TextBox
+        text.EditingEnded += () =>
         {
-            Text = card["text"].Str(),
-            AcceptsReturn = true,
-            TextWrapping = TextWrapping.Wrap,
-            MaxHeight = 240,
+            if (text.GetContent().Text.Length == 0)
+            {
+                if (pending.TryGetValue("text", out var queuedText) && pending.TryGetValue("rtf", out var queuedRtf))
+                    text.Load(queuedText.Value?.GetValue<string>() ?? savedContent.Text, queuedRtf.Value?.GetValue<string>() ?? savedContent.Rtf);
+                else text.Load(savedContent.Text, savedContent.Rtf);
+            }
+            else
+            {
+                Patch(new JsonObject());
+            }
+            QueueCardsRefresh();
         };
-        AutomationProperties.SetName(text, T("card.text"));
-        text.LostFocus += (_, _) =>
-        {
-            var value = text.Text.Trim();
-            if (value.Length == 0)
-            {
-                text.Text = card["text"].Str();
-            }
-            else if (value != card["text"].Str())
-            {
-                Patch(new JsonObject { ["text"] = value });
-            }
-            if (cardsPending)
-            {
-                owner.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-                {
-                    if (!closed && cardsPending && !Editing())
-                    {
-                        FillCards();
-                    }
-                });
-            }
-        };
-        stack.Children.Add(text);
-        var meta = new List<string> { T(todo ? "cards.kind.todo" : "cards.kind.note"), Format.When(card["created"].Str()) };
-        if (!archived && app.Cards.Shown && card["visible"].Bool())
-        {
-            meta.Add(T("cards.onDesktop"));
-        }
-        stack.Children.Add(Secondary(string.Join(" · ", meta)));
+        stack.Children.Add(text.View);
+        var meta = T(todo ? "cards.kind.todo" : "cards.kind.note") + " · " + Format.When(card["created"].Str());
+        var metadata = Secondary(meta);
+        stack.Children.Add(metadata);
         Grid.SetColumn(stack, 1);
         grid.Children.Add(stack);
 
         var menu = new MenuFlyout();
+        text.TrackExternalFlyout(menu);
+        menu.Opening += (_, _) =>
+        {
+            // The active editor may belong to an earlier row. Keep its footer
+            // until this menu closes so the anchor cannot move during the click.
+            foreach (var editor in cardEditors.Where(editor => editor.IsEditing))
+                editor.TrackExternalFlyout(menu, isOpening: true);
+        };
+        menu.Closed += (_, _) => QueueCardsRefresh();
         void Item(string label, string glyph, Action run)
         {
             var item = new MenuFlyoutItem { Text = label, Icon = new FontIcon { Glyph = glyph } };
@@ -253,14 +378,26 @@ internal sealed partial class NotebookView
         if (!archived)
         {
             var visible = card["visible"].Bool();
-            Item(T(visible ? "cards.hideDesktop" : "cards.showDesktop"), visible ? "" : "", () =>
+            var icon = new FontIcon();
+            var toggle = new MenuFlyoutItem { Icon = icon };
+            void UpdateVisibility(bool value)
+            {
+                visible = value;
+                metadata.Text = visible && app.Cards.Shown ? meta + " · " + T("cards.onDesktop") : meta;
+                toggle.Text = T(visible ? "cards.hideDesktop" : "cards.showDesktop");
+                icon.Glyph = visible ? "" : "";
+            }
+            rowVisibility[id] = UpdateVisibility;
+            UpdateVisibility(visible);
+            toggle.Click += (_, _) =>
             {
                 Patch(new JsonObject { ["visible"] = !visible });
                 if (!visible && !app.Cards.Shown)
                 {
                     _ = app.Engine.CallAsync("cards.show", new JsonObject { ["on"] = true });
                 }
-            });
+            };
+            menu.Items.Add(toggle);
         }
         Item(T(todo ? "cards.toNote" : "cards.toTodo"), todo ? "" : "", () =>
             Patch(new JsonObject { ["kind"] = todo ? "note" : "todo" }));
@@ -272,14 +409,29 @@ internal sealed partial class NotebookView
             Patch(new JsonObject { ["archived"] = !archived }));
         var when = WhenPicker.Create(() => (long)card["createdMs"].Num(), () => root.ActualTheme,
             ms => Patch(new JsonObject { ["createdMs"] = ms }));
+        text.TrackExternalFlyout(when);
+        when.Opening += (_, _) =>
+        {
+            foreach (var editor in cardEditors.Where(editor => editor.IsEditing))
+                editor.TrackExternalFlyout(when, isOpening: true);
+        };
+        when.Closed += (_, _) => QueueCardsRefresh();
         Item(T("card.menu.date"), "", () =>
-            owner.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { if (!closed) when.ShowAt(text); }));
+        {
+            // Protect the editor during the gap between the menu closing and
+            // the date picker opening, so saving cannot replace its anchor.
+            text.TrackExternalFlyout(when, isOpening: true);
+            foreach (var editor in cardEditors.Where(editor => editor.IsEditing))
+                editor.TrackExternalFlyout(when, isOpening: true);
+            owner.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { if (!closed) when.ShowAt(text.View); });
+        });
         menu.Items.Add(new MenuFlyoutSeparator());
         Item(T("cards.delete"), "", () => _ = DeleteCard(id));
         var more = new Button
         {
             Content = new FontIcon { Glyph = "", FontSize = 14 },
             Flyout = menu,
+            AllowFocusOnInteraction = false,
             VerticalAlignment = VerticalAlignment.Top,
         };
         AutomationProperties.SetName(more, T("cards.more"));
@@ -287,13 +439,6 @@ internal sealed partial class NotebookView
         Grid.SetColumn(more, 2);
         grid.Children.Add(more);
         return new Border { Style = Res<Style>("CardStyle"), Child = grid };
-    }
-
-    private async Task PatchCard(ulong id, JsonObject patch)
-    {
-        var reply = await app.Engine.CallAsync("cards.update", new JsonObject { ["id"] = id, ["patch"] = patch });
-        if (closed) return;
-        cardsStatus.Text = reply.Ok() ? "" : Loc.Error(reply["error"].Str());
     }
 
     private async Task DeleteCard(ulong id)
@@ -312,7 +457,8 @@ internal sealed partial class NotebookView
         {
             return;
         }
-        var reply = await app.Engine.CallAsync("cards.delete", new JsonObject { ["id"] = id });
+        if (!await FlushAsync() || closed) return;
+        var reply = await app.Cards.DeleteAsync(id);
         if (closed) return;
         cardsStatus.Text = reply.Ok() ? "" : Loc.Error(reply["error"].Str());
     }

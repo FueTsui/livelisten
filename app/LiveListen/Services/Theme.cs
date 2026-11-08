@@ -79,12 +79,11 @@ internal static class Theme
     public static SurfaceLook Look(SettingsStore s, string surface, JsonObject? own = null)
     {
         var theme = s.Str("appearance.theme", "system");
-        if (own is not null)
-        {
-            return Look(theme, key => own[key]);
-        }
         var p = "appearance." + surface + ".";
-        var look = Look(theme, key => s.Get(p + key));
+        JsonNode? Field(string key) => own is not null ? own[key] : s.Get(p + key);
+        if (surface == "cards") return CardLook(theme, Field);
+        var look = Look(theme, Field);
+        if (own is not null) return look;
         // Empty legacy/default colors resolve transparently for dictation only.
         // Explicit saved colors, subtitle defaults and card styles are preserved.
         return surface == "bar" ? look with
@@ -94,6 +93,16 @@ internal static class Theme
             Border = Parse(s.Str(p + "border")) ?? Color.FromArgb(0, 0, 0, 0),
             Shadow = string.IsNullOrWhiteSpace(s.Str(p + "shadow")) ? "none" : look.Shadow,
         } : look;
+    }
+
+    /// <summary>Automatic card text stays softly contrasting with the selected background.</summary>
+    public static SurfaceLook CardLook(string theme, Func<string, JsonNode?> field)
+    {
+        var look = Look(theme, field);
+        return Parse(field("text").Str()) is not null ? look : look with
+        {
+            Text = look.Dark ? Color.FromArgb(255, 245, 245, 245) : Color.FromArgb(255, 36, 36, 36),
+        };
     }
 
     /// <summary>Resolves a style whose fields are read with <paramref name="field"/>.</summary>

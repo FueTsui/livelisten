@@ -1,0 +1,4 @@
+{
+  "text": "formatted\nquote one\nquote two\nnumber one\nnumber two\n\u2610 todo one\n\u2013 dash one",
+  "rtf": "{\\rtf1\\fbidis\\ansi\\ansicpg936\\deff0\\nouicompat\\deflang1033\\deflangfe2052{\\fonttbl{\\f0\\fnil Segoe UI;}}\r\n{\\colortbl ;\\red192\\green44\\blue214;\\red0\\green0\\blue255;\\red0\\green0\\blue0;}\r\n{\\*\\generator Riched20 3.2.0000}\\viewkind4\\uc1 \r\n\\pard\\tx720 {\\cf1\\b\\f0\\fs21\\lang2052{\\field{\\*\\fldinst{HYPERLINK \u0022https://example.com/note\u0022}}{\\fldrslt{\\ul\\cf2 formatted}}}}\\f0\\fs21\\par\r\n\r\n\\pard\\li260\\tx720 quote one\\par\r\nquote two\\par\r\n\r\n\\pard \r\n{\\pntext\\f0 1.\\tab}{\\*\\pn\\pnlvlbody\\pnf0\\pnindent0\\pnstart1\\pndec{\\pntxta.}}\r\n\\fi-240\\li240\\tx720 number one\\par\r\n{\\pntext\\f0 2.\\tab}number two\\par\r\n\r\n\\pard\\fi-240\\li240\\tx720\\u9744? todo one\\par\r\n\\endash  dash one\\par\r\n}\r\n"
+}
