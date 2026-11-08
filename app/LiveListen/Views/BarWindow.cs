@@ -83,10 +83,6 @@ internal sealed partial class BarWindow : Window
     private double targetScale = 1.5;
     private double layoutScale = 3;
     private double captionReserve = 240;
-    private double captionHeight;
-    private bool captionAbove;
-    private double captionMinTop = double.NegativeInfinity;
-    private double captionMaxTop = double.PositiveInfinity;
     private Point? zoomAnchor;
 
     public BarWindow(App app, Func<string, bool>? copyText = null)
@@ -290,8 +286,8 @@ internal sealed partial class BarWindow : Window
 
     private void SetCaptionReserve()
     {
-        // Reserve both caption lanes even while idle. Flipping above the visual or
-        // changing the number of text lines never moves its center or resizes on zoom.
+        // Reserve a stable window size even while idle so text changes and zoom
+        // keep the voice visual anchored.
         body.Margin = new Thickness(8, captionReserve + 8, 8, 0);
         root.Height = main.Height + captionReserve * 2 + 16;
     }
@@ -303,14 +299,7 @@ internal sealed partial class BarWindow : Window
     // canvas. These fixed envelopes include the loudest frame without audio jitter.
     private double CaptionExtent => voice.IsRibbon ? 14 : 62;
 
-    private double CaptionOffset(double scale)
-    {
-        var center = body.Margin.Top + main.Height / 2;
-        var top = captionAbove ? center - CaptionExtent * scale - textGap - captionHeight
-            : center + CaptionExtent * scale + textGap;
-        top = Math.Clamp(top, captionMinTop, Math.Max(captionMinTop, captionMaxTop));
-        return top - (body.Margin.Top + main.Height + textGap);
-    }
+    private double CaptionOffset(double scale) => CaptionExtent * scale - main.Height / 2;
 
     private void PlaceCaption()
     {
@@ -321,25 +310,9 @@ internal sealed partial class BarWindow : Window
             // The visual, rather than the large transparent HWND, selects its monitor.
             var display = DisplayArea.GetFromPoint(new PointInt32((int)Math.Round(point.X), (int)Math.Round(point.Y)),
                 DisplayAreaFallback.Nearest);
-            var liveVisible = liveScroll.Visibility == Visibility.Visible;
-            // Live text can use the taskbar strip. Status-only text stays within the work area.
-            var bounds = liveVisible ? display.OuterBounds : display.WorkArea;
+            // All text attached to the voice visual can use the taskbar strip.
+            var bounds = display.OuterBounds;
             ConstrainCaption(bounds, dpi);
-            captionHeight = captionPanel.Visibility == Visibility.Visible ? captionPanel.ActualHeight : 0;
-            var below = (bounds.Y + bounds.Height - point.Y) / dpi;
-            var margin = liveVisible ? 0 : 8;
-            if (liveVisible)
-            {
-                var reach = CaptionExtent * CurrentScale + textGap + captionHeight;
-                captionAbove = VoiceSizing.LiveCaptionAbove(below, reach);
-            }
-            else
-            {
-                var above = (point.Y - bounds.Y) / dpi;
-                captionAbove = below < CaptionExtent * VoiceSizing.Maximum + textGap + captionHeight + margin && above > below;
-            }
-            captionMinTop = (bounds.Y - AppWindow.Position.Y) / dpi + margin;
-            captionMaxTop = (bounds.Y + bounds.Height - AppWindow.Position.Y) / dpi - captionHeight - margin;
             var left = (body.Width + 16 - captionPanel.ActualWidth) / 2;
             var minLeft = (bounds.X - AppWindow.Position.X) / dpi + 8;
             var maxLeft = (bounds.X + bounds.Width - AppWindow.Position.X) / dpi - captionPanel.ActualWidth - 8;
@@ -406,8 +379,7 @@ internal sealed partial class BarWindow : Window
         zoomAnimation?.Stop();
         zoomAnimation = null;
         voiceScale = targetScale;
-        if (liveScroll.Visibility == Visibility.Visible) PlaceCaption();
-        else ApplyScale(voiceScale);
+        ApplyScale(voiceScale);
         UpdateHitRegion();
         settings.Set(voice.IsRibbon ? "appearance.ribbonScale" : "appearance.voiceScale", voiceScale);
         SavePosition(AppWindow.Position);
@@ -441,7 +413,7 @@ internal sealed partial class BarWindow : Window
         var width = (int)Math.Ceiling((body.Width + 16) * dpi);
         var height = Math.Max(1, (int)Math.Ceiling(root.DesiredSize.Height * dpi));
         var position = AppWindow.Position;
-        // Always anchor the graphic itself, including when captions flip above it.
+        // Always anchor the graphic itself as the text changes.
         var x = anchor is { } a ? (int)Math.Round(a.X - (body.Width / 2 + 8) * dpi) : position.X;
         var y = anchor is { } b ? (int)Math.Round(b.Y - (main.Height / 2 + body.Margin.Top) * dpi) : position.Y;
         if (position.X != x || position.Y != y || AppWindow.Size.Width != width || AppWindow.Size.Height != height)
