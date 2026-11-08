@@ -1,0 +1,3 @@
+# The WinUI shell is x64 and loads the core DLL, so build for the MSVC target on every host toolchain.
+[build]
+target = "x86_64-pc-windows-msvc"

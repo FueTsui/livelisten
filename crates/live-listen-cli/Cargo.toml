@@ -1,0 +1,21 @@
+[package]
+name = "live-listen-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "../../scripts/build_native_metadata.rs"
+
+[[bin]]
+name = "live-listen"
+path = "src/main.rs"
+
+[dependencies]
+live-listen-core = { path = "../live-listen-core" }
+serde_json.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

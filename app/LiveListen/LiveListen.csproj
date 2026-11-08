@@ -1,0 +1,70 @@
+<Project Sdk="Microsoft.NET.Sdk" TreatAsLocalProperty="OutputPath">
+  <PropertyGroup>
+    <!-- WinUI concatenates OutputPath with generated XAML names before the SDK's
+         later path normalization. CLI -o paths also need their final separator. -->
+    <AppendTargetFrameworkToOutputPath Condition="'$(OutputPath)' != '' And '$(AppendTargetFrameworkToOutputPath)' == ''">false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath Condition="'$(OutputPath)' != '' And '$(AppendRuntimeIdentifierToOutputPath)' == ''">false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath Condition="'$(OutputPath)' != ''">$([MSBuild]::EnsureTrailingSlash('$(OutputPath)'))</OutputPath>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RootNamespace>LiveListen</RootNamespace>
+    <AssemblyName>LiveListen</AssemblyName>
+    <Version>0.1.0</Version>
+    <Product>LiveListen</Product>
+    <Company>FueTsui</Company>
+    <Authors>$(Company)</Authors>
+    <Copyright>Copyright © 2026 $(Company). All Rights Reserved.</Copyright>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <Platform Condition="'$(Platform)' == '' or '$(Platform)' == 'AnyCPU'">x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WinUISDKReferences>false</WinUISDKReferences>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <SatelliteResourceLanguages>en;zh-Hans</SatelliteResourceLanguages>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">true</PublishReadyToRun>
+    <RustProfile Condition="'$(Configuration)' == 'Debug'">debug</RustProfile>
+    <RustProfile Condition="'$(Configuration)' != 'Debug'">release</RustProfile>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))</RepoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Rust core, built by scripts\build.ps1 (cargo build -p live-listen-ffi). -->
+    <Content Include="$(RepoRoot)\target\x86_64-pc-windows-msvc\$(RustProfile)\livelisten_native.dll" Link="livelisten_native.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(RepoRoot)\target\x86_64-pc-windows-msvc\$(RustProfile)\livelisten_native.dll')" />
+    <!-- Doubao bridge; the doubao_asr module itself is found next to the app or configured. -->
+    <Content Include="$(RepoRoot)\providers\official_live.py" Link="providers\official_live.py" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(RepoRoot)\providers\doubao_live.py" Link="providers\doubao_live.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
+    <ProjectCapability Include="Msix" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
+    <!-- The components of Microsoft.WindowsAppSDK 2.5.1 that the app uses, at the versions that
+         metapackage pins. Its AI, ML (onnxruntime, DirectML), Search, Widgets and DWrite parts
+         are left out: about 60 MB the app never loads. Runtime checks the component versions. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="2.0.4" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.12" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
+  </ItemGroup>
+
+  <Target Name="WarnMissingCore" BeforeTargets="Build" Condition="!Exists('$(RepoRoot)\target\x86_64-pc-windows-msvc\$(RustProfile)\livelisten_native.dll')">
+    <Warning Text="livelisten_native.dll ($(RustProfile)) is missing. Run scripts\build.ps1 or: cargo build -p live-listen-ffi" />
+  </Target>
+</Project>

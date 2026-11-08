@@ -1,0 +1,55 @@
+[package]
+name = "live-listen-setup"
+description = "Windows installer: a setup program with an appended, SHA-256-verified payload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+# The setup program. The same binary, with a payload that lists no files, is the uninstaller.
+[[bin]]
+name = "setup"
+path = "src/main.rs"
+
+# Packs an app folder and the install manifest into the setup program (build step).
+[[bin]]
+name = "pack"
+path = "src/bin/pack.rs"
+
+[dependencies]
+# The setup window, the same toolkit and version as the other apps' installers (REL-08).
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_Compression",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints]
+workspace = true

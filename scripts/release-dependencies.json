@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "checkedOn": "2026-11-08",
+  "python": {
+    "name": "CPython",
+    "version": "3.13.17",
+    "file": "python-3.13.17-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+    "sha256": "9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38",
+    "metadataUrl": "https://www.python.org/downloads/release/python-31317/",
+    "stdlibZip": "python313.zip",
+    "pathFile": "python313._pth",
+    "license": "PSF-2.0 and bundled third-party notices"
+  },
+  "websocketClient": {
+    "name": "websocket-client",
+    "version": "1.8.0",
+    "file": "websocket_client-1.8.0-py3-none-any.whl",
+    "url": "https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl",
+    "sha256": "17b44cc997f5c498e809b22cdf2d9c7a9e71c02c8cc2b6c56e7c2d1239bfa526",
+    "metadataUrl": "https://pypi.org/project/websocket-client/1.8.0/",
+    "license": "Apache-2.0"
+  }
+}

@@ -1,0 +1,5 @@
+# Git hooks (SUP-07). Requires lefthook and gitleaks on PATH; run `lefthook install` once.
+pre-commit:
+  commands:
+    gitleaks:
+      run: gitleaks git --pre-commit --staged --redact --no-banner

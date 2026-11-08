@@ -1,0 +1,34 @@
+# Build output
+dist/
+build/
+target/
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+coverage/
+.wrangler/
+
+# Secrets and local configuration (ENG-02)
+.env
+.env.*
+.dev.vars
+*.pem
+*.key
+*.p12
+*.pfx
+config.local.*
+
+# Logs and private evidence
+*.log
+evidence/private/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# .NET and Visual Studio
+app/**/bin/
+app/**/obj/
+.vs/
+*.user

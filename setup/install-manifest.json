@@ -1,0 +1,17 @@
+{
+  "id": "LiveListen",
+  "name": { "zh": "LiveListen", "en": "LiveListen" },
+  "publisher": "FueTsui",
+  "exe": "LiveListen.exe",
+  "icon": "../app/LiveListen/Assets/AppIcon.ico",
+  "backgroundArgs": "--background",
+  "quitArgs": ["--quit"],
+  "dataDirs": [
+    { "base": "roamingAppData", "path": "LiveListen" },
+    { "base": "localAppData", "path": "LiveListen" }
+  ],
+  "credentialPrefix": "LiveListen/",
+  "dataLabel": { "zh": "设置、随手记卡片和已保存的密钥", "en": "settings, note cards and saved keys" },
+  "testEnvironment": { "LIVE_LISTEN_CONFIG_DIR": "{roamingAppData}\\LiveListen" },
+  "tasks": { "startMenu": true, "desktop": false, "startup": false }
+}

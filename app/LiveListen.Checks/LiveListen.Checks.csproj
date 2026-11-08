@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\LiveListen\Services\PendingCalls.cs" Link="PendingCalls.cs" />
+    <Compile Include="..\LiveListen\Services\SettingsSaveQueue.cs" Link="SettingsSaveQueue.cs" />
+    <Compile Include="..\LiveListen\Services\VoiceMotion.cs" Link="VoiceMotion.cs" />
+    <Compile Include="..\LiveListen\Services\VoiceSizing.cs" Link="VoiceSizing.cs" />
+    <Compile Include="..\LiveListen\Services\UnwrittenClipboard.cs" Link="UnwrittenClipboard.cs" />
+    <Compile Include="..\LiveListen\Services\SettingsRefresh.cs" Link="SettingsRefresh.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,20 @@
+[package]
+name = "live-listen-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "../../scripts/build_native_metadata.rs"
+
+[lib]
+name = "livelisten_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+live-listen-core = { path = "../live-listen-core" }
+
+[build-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
