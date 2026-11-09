@@ -10,8 +10,7 @@
     { "base": "roamingAppData", "path": "LiveListen" },
     { "base": "localAppData", "path": "LiveListen" }
   ],
-  "credentialPrefix": "LiveListen/",
-  "dataLabel": { "zh": "设置、随手记卡片和已保存的密钥", "en": "settings, note cards and saved keys" },
+  "dataLabel": { "zh": "设置、随手记卡片、随手记文档和已保存的密钥", "en": "settings, note cards, note documents and saved keys" },
   "testEnvironment": { "LIVE_LISTEN_CONFIG_DIR": "{roamingAppData}\\LiveListen" },
   "tasks": { "startMenu": true, "desktop": false, "startup": false }
 }

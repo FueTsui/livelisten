@@ -58,18 +58,15 @@ pub fn confirm(text: &str) -> bool {
     message_box(text, MB_OKCANCEL | MB_ICONINFORMATION) == IDOK
 }
 
-/// The uninstall confirmation without the setup window: `None` when cancelled, else
-/// whether to delete the user's data too.
-pub fn confirm_uninstall(name: &str, data: &str) -> Option<bool> {
+/// The uninstall confirmation when the setup window cannot be shown.
+pub fn confirm_uninstall(name: &str, data: &str) -> bool {
     let title = HSTRING::from(format!("{} {name}", tr("卸载", "Uninstall")));
     let main = HSTRING::from(format!("{}{name}{}", tr("要卸载", "Uninstall "), tr("吗？", "?")));
     let content = HSTRING::from(format!(
         "{}{data}{}",
         tr("将删除程序文件、快捷方式和卸载信息。", "Program files, shortcuts and the uninstall entry are removed. "),
-        tr("默认保留，重新安装后可继续使用。", " are kept by default and work again after reinstalling.")
+        tr("会保留，重新安装后可继续使用。", " are kept and work again after reinstalling.")
     ));
-    let verify =
-        HSTRING::from(format!("{}{data}{}", tr("同时删除", "Also delete "), tr("（无法恢复）", " (cannot be undone)")));
     let label = HSTRING::from(tr("卸载", "Uninstall"));
     let buttons = [TASKDIALOG_BUTTON { nButtonID: 100, pszButtonText: PCWSTR(label.as_ptr()) }];
     let config = TASKDIALOGCONFIG {
@@ -83,13 +80,11 @@ pub fn confirm_uninstall(name: &str, data: &str) -> Option<bool> {
         cButtons: buttons.len() as u32,
         pButtons: buttons.as_ptr(),
         nDefaultButton: 100,
-        pszVerificationText: PCWSTR(verify.as_ptr()),
         ..Default::default()
     };
-    let (mut pressed, mut delete) = (0i32, windows::core::BOOL(0));
+    let mut pressed = 0;
     // SAFETY: every string and the button array outlive this modal call.
-    unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, Some(&mut delete)) }.ok()?;
-    (pressed == 100).then_some(delete.as_bool())
+    unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) }.is_ok() && pressed == 100
 }
 
 /// The system folder picker, owned by `owner`.

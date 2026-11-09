@@ -19,7 +19,7 @@ use windows::core::HSTRING;
 
 use crate::hash;
 use crate::log;
-use crate::manifest::{FORMAT, Packed, Product, RECORD_FILE, Record, Role, Tasks, UNINSTALLER};
+use crate::manifest::{FORMAT, Packed, Product, RECORD_FILE, Record, Role, Tasks, UNINSTALLER, safe_relative};
 use crate::paths::{self, Env};
 use crate::payload::{Package, PackageError, Writer};
 use crate::process::{self, Quit};
@@ -27,7 +27,7 @@ use crate::registry::{self, Entry, Registry, Value};
 use crate::shortcut;
 use crate::text::{self, tr};
 
-/// How long programs get to exit after being asked, before ending them is considered.
+/// How long setup waits for programs to exit normally.
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// `/UPDATE` waits longer and never ends programs: an unattended update must not lose work.
 pub const UPDATE_CLOSE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -85,34 +85,14 @@ pub enum Stage {
 pub trait Report: Sync {
     fn progress(&self, stage: Stage, done: u64, total: u64);
     fn cancelled(&self) -> bool;
-    /// These programs did not exit in time; `true` allows ending them.
-    fn force_close(&self, names: &[String]) -> bool;
 }
 
-/// Silent runs: no cancelling, and programs that ignore the quit request are ended.
+/// Silent runs without a progress window.
 pub struct Quiet;
 
 impl Report for Quiet {
     fn progress(&self, _: Stage, _: u64, _: u64) {}
     fn cancelled(&self) -> bool {
-        false
-    }
-    fn force_close(&self, names: &[String]) -> bool {
-        log!("ending after the timeout: {}", names.join(", "));
-        true
-    }
-}
-
-/// `/UPDATE`: no cancelling, and programs that do not exit stop the update (exit code 7).
-pub struct Unattended;
-
-impl Report for Unattended {
-    fn progress(&self, _: Stage, _: u64, _: u64) {}
-    fn cancelled(&self) -> bool {
-        false
-    }
-    fn force_close(&self, names: &[String]) -> bool {
-        log!("still running after the update timeout, not ended: {}", names.join(", "));
         false
     }
 }
@@ -150,7 +130,8 @@ pub struct Installed {
 
 pub fn read_record(dir: &Path, id: &str) -> Option<Record> {
     let record: Record = serde_json::from_slice(&fs::read(dir.join(RECORD_FILE)).ok()?).ok()?;
-    (record.format == FORMAT && record.id == id).then_some(record)
+    (record.format == FORMAT && record.id == id && record.files.iter().all(|file| safe_relative(file)))
+        .then_some(record)
 }
 
 pub fn main_exe(dir: &Path, product: &Product) -> PathBuf {
@@ -224,7 +205,7 @@ pub fn check_new_dir(dir: &Path, env: &Env, packed: &Packed) -> Result<(), Strin
             tr("请填写完整路径，例如 D:\\Apps\\LiveListen。", "Use a full path such as D:\\Apps\\LiveListen.").into()
         );
     }
-    if paths::protected(dir, env) {
+    if paths::protected(dir, env) || paths::in_data_dir(dir, env, &packed.product) {
         return Err(tr(
             "不能直接安装到这个系统或用户文件夹，请在它下面新建一个文件夹。",
             "This system or user folder cannot be used directly; choose a new folder inside it.",
@@ -297,18 +278,6 @@ fn remove_tree(dir: &Path) {
         }
     }
     log!("could not remove {}", dir.display());
-}
-
-/// Removes staging folders a crashed run left inside the install folder.
-pub fn clear_stale_staging(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(STAGING_PREFIX) && entry.path().is_dir() {
-            log!("removing a leftover {name}");
-            remove_tree(&entry.path());
-        }
-    }
 }
 
 /// Removes the folders of `files` (relative, `/` separated) that are empty now.
@@ -494,7 +463,7 @@ pub fn install(env: &Env, package: &mut Package, plan: &Plan, report: &dyn Repor
     let packed = package.manifest.clone();
     let product = &packed.product;
     let dir = &plan.dir;
-    if dir.parent().is_none() {
+    if dir.parent().is_none() || paths::in_data_dir(dir, env, product) {
         return Err(Failure::Invalid(tr("安装位置无效。", "Invalid install folder.").into()));
     }
     log!("installing {} {} into {}", product.id, packed.version, dir.display());
@@ -507,7 +476,6 @@ pub fn install(env: &Env, package: &mut Package, plan: &Plan, report: &dyn Repor
             let _ = fs::remove_dir(dir);
         }
     };
-    clear_stale_staging(dir);
     let need = packed.total_size() + (64 << 20);
     if let Some(free) = free_space(dir).filter(|&free| free < need) {
         if created {
@@ -522,9 +490,13 @@ pub fn install(env: &Env, package: &mut Package, plan: &Plan, report: &dyn Repor
         )));
     }
     let staging = dir.join(format!("{STAGING_PREFIX}{}", std::process::id()));
-    remove_tree(&staging);
+    // Claim a new directory before writing or cleaning up any staging files.
+    fs::create_dir(&staging).map_err(|e| Failure::RolledBack(format!("{}: {e}", staging.display())))?;
     let new = staging.join("new");
-    fs::create_dir_all(&new).map_err(|e| Failure::RolledBack(format!("{}: {e}", staging.display())))?;
+    if let Err(e) = fs::create_dir(&new) {
+        abandon(&staging);
+        return Err(Failure::RolledBack(format!("{}: {e}", staging.display())));
+    }
     let previous = read_record(dir, &product.id);
     let registry = env.registry();
     let (start, desktop) = shortcut_paths(env, product);
@@ -555,8 +527,7 @@ pub fn install(env: &Env, package: &mut Package, plan: &Plan, report: &dyn Repor
     report.progress(Stage::Closing, 0, 1);
     let env_vars = env.child_environment(product);
     let quit = Quit { exe: main_exe(dir, product), args: &product.quit_args, env: &env_vars };
-    let was_running = match process::close_all(dir, Some(quit), plan.close_timeout, &|names| report.force_close(names))
-    {
+    let was_running = match process::close_all(dir, Some(quit), plan.close_timeout) {
         Ok(running) => running,
         Err(names) => {
             abandon(&staging);
@@ -678,9 +649,6 @@ pub(crate) mod tests {
         fn cancelled(&self) -> bool {
             self.0.load(Ordering::Relaxed)
         }
-        fn force_close(&self, _: &[String]) -> bool {
-            false
-        }
     }
 
     #[test]
@@ -708,6 +676,8 @@ pub(crate) mod tests {
         drop(uninstaller);
 
         fs::write(dir.join("notes.txt"), b"mine").unwrap();
+        fs::create_dir(dir.join(".setup-personal")).unwrap();
+        fs::write(dir.join(".setup-personal/note.md"), b"keep").unwrap();
         drop(package);
         let t2 = Test::new("upgrade-v2", &[("Demo.exe", b"v2".to_vec()), ("new.dll", b"new".to_vec())]);
         let existing = find_existing(&t.env, &registry, &product(), None).unwrap().unwrap();
@@ -730,7 +700,8 @@ pub(crate) mod tests {
         assert_eq!(fs::read(dir.join("notes.txt")).unwrap(), b"mine", "files the user added stay");
         assert!(run_points_here(&registry.run("Demo").unwrap().unwrap(), &dir, &product()));
         assert!(t.env.desktop.read_dir().unwrap().count() == 1, "the new option is applied");
-        assert!(staging_left(&dir).is_empty());
+        assert_eq!(staging_left(&dir), [".setup-personal"]);
+        assert_eq!(fs::read(dir.join(".setup-personal/note.md")).unwrap(), b"keep");
         assert_eq!(fs::read_dir(dir.parent().unwrap()).unwrap().count(), 1);
 
         // Turning an option off removes what it made.

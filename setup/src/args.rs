@@ -24,8 +24,8 @@ pub struct Args {
     /// Upgrade an existing installation only, and start the program again if it was running.
     pub update: bool,
     pub no_launch: bool,
-    /// Uninstaller: also delete settings, user data and saved credentials.
-    pub delete_data: bool,
+    /// Uninstall the existing installation using this setup program.
+    pub uninstall: bool,
     /// Check the package and exit.
     pub verify: bool,
     pub help: bool,
@@ -61,7 +61,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
             ("/NORESTART", None) => out.no_restart = true,
             ("/UPDATE", None) => out.update = true,
             ("/NOLAUNCH", None) => out.no_launch = true,
-            ("/DELETEDATA", None) => out.delete_data = true,
+            ("/UNINSTALL", None) => out.uninstall = true,
+            // Old scripts can still uninstall, with the same data protection as the UI.
+            ("/DELETEDATA", None) => {}
             ("/VERIFY", None) => out.verify = true,
             ("/?" | "/HELP", None) => out.help = true,
             ("/LOG", None) => out.log = Some(None),
@@ -89,6 +91,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
             _ => return Err(format!("unknown argument {arg:?}")),
         }
     }
+    if out.uninstall && out.update {
+        return Err("/UNINSTALL and /UPDATE cannot be used together".into());
+    }
     Ok(out)
 }
 
@@ -104,7 +109,8 @@ pub const USAGE: &str = "\
 /NOLAUNCH            do not start the program afterwards (silent installs never start it;
                      /UPDATE starts it again only when it was running)
 /VERIFY              check the package and exit
-Uninstaller: /SILENT /VERYSILENT /SUPPRESSMSGBOXES /LOG[=<file>] /DELETEDATA
+/UNINSTALL           uninstall the existing installation and keep user data
+Uninstaller: /SILENT /VERYSILENT /SUPPRESSMSGBOXES /LOG[=<file>]
 
 Exit codes: 0 success; 1 damaged package or invalid arguments; 2 cancelled;
 3 failed and rolled back; 7 the running program could not be closed, nothing replaced.";
@@ -139,6 +145,8 @@ mod tests {
         assert!(args.update && args.no_launch && args.no_restart);
         assert_eq!(p(&["/LOG"]).unwrap().log, Some(None));
         assert!(p(&[]).unwrap().may_show_messages());
+        assert_eq!(p(&["/DELETEDATA"]).unwrap(), Args::default());
+        assert!(p(&["/UNINSTALL", "/DELETEDATA"]).unwrap().uninstall);
     }
 
     #[test]
@@ -151,6 +159,7 @@ mod tests {
             &["/TASKS=everything"],
             &["/SILENT=1"],
             &["install"],
+            &["/UPDATE", "/UNINSTALL"],
         ] {
             assert!(p(bad).is_err(), "{bad:?}");
         }

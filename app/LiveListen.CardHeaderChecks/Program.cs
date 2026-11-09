@@ -24,7 +24,7 @@ Check("display date keeps original local time", Render("monthDayTime", "2028-02-
 Check("weekday follows the selected display date", Render("weekdayTitle", "2028-02-29") == "星期二 - 自定义");
 Check("UTC creation uses local calendar day", Render("yearMonthDay", stamp: "2026-11-07T17:00:00Z") == "2026年11月8日");
 Check("blank custom title uses card kind", Render("title", title: " \t ") == "待办");
-Check("unknown mode and invalid date fall back", Render("old-mode", "2026-02-29") == "2026年11月8日");
+Check("unknown mode defaults to title", Render("old-mode", "2026-02-29") == "自定义");
 Check("invalid timestamp does not invent a date", Render("monthDayTitle", stamp: "invalid") == "自定义");
 Check("chosen date can be shown without an invalid creation time", Render("monthDayTime", "2028-02-29", stamp: "invalid") == "2月29日");
 Check("English headers use English calendar text", Render("monthDayWeekday", english: true) == "Nov 8 - Sunday");

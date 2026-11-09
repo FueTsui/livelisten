@@ -34,7 +34,6 @@ pub struct Choice {
     /// Start the program when done (silent progress windows; the interactive window starts
     /// it itself from the result page).
     pub launch: bool,
-    pub delete_data: bool,
 }
 
 pub enum Done {
@@ -65,14 +64,13 @@ pub struct View {
     pub newer: Option<String>,
     pub tasks: Tasks,
     pub launch: bool,
-    pub delete_data: bool,
     /// Progress only, closing by itself (`/SILENT`, `/UPDATE`).
     pub auto: bool,
     /// `/UPDATE`: the progress page says "updating".
     pub updating: bool,
     /// `/SUPPRESSMSGBOXES`: a failure closes the window instead of showing it.
     pub suppress: bool,
-    /// The uninstaller of the installation in `dir`, offered on the welcome page.
+    /// Existing installation directory, offered for removal on the welcome page.
     pub uninstaller: Option<PathBuf>,
     pub check_dir: CheckDir,
     pub running: Box<dyn Fn(&Path) -> bool>,
@@ -522,11 +520,6 @@ impl Report for Progress {
     fn cancelled(&self) -> bool {
         false
     }
-
-    /// The user already agreed to close the program before the work started.
-    fn force_close(&self, _: &[String]) -> bool {
-        true
-    }
 }
 
 struct App {
@@ -541,7 +534,6 @@ struct App {
     dir_text: String,
     dir_error: Option<String>,
     tasks: Tasks,
-    delete_data: bool,
     close_approved: bool,
     notice: Option<String>,
     launch_now: bool,
@@ -560,7 +552,6 @@ impl App {
         App {
             dir_text: view.dir.display().to_string(),
             tasks: view.tasks,
-            delete_data: view.delete_data,
             launch_now: view.launch,
             view,
             work: Some(work),
@@ -586,10 +577,7 @@ impl App {
         format!(
             "{}{}",
             self.name(),
-            tr(
-                " 正在运行。继续将先请它正常退出，必要时再结束它。",
-                " is running. Continuing asks it to exit first and ends it if needed."
-            )
+            tr(" 正在运行。继续会请求程序保存并退出。", " is running. Continuing asks the program to save and exit.")
         )
     }
 
@@ -613,12 +601,7 @@ impl App {
 
     /// `/SILENT` and `/UPDATE`: start at once with the prepared choices.
     fn start_auto(&mut self, ctx: &egui::Context) {
-        let choice = Choice {
-            dir: self.view.dir.clone(),
-            tasks: self.tasks,
-            launch: self.view.launch,
-            delete_data: self.delete_data,
-        };
+        let choice = Choice { dir: self.view.dir.clone(), tasks: self.tasks, launch: self.view.launch };
         self.spawn_work(ctx, choice);
     }
 
@@ -644,7 +627,7 @@ impl App {
             self.notice = Some(self.running_notice());
             return;
         }
-        let choice = Choice { dir, tasks: self.tasks, launch: false, delete_data: self.delete_data };
+        let choice = Choice { dir, tasks: self.tasks, launch: false };
         self.spawn_work(ctx, choice);
     }
 
@@ -767,8 +750,7 @@ impl App {
         }
     }
 
-    /// When the folder already has the program, its own uninstaller is offered at the
-    /// right end of the footer row.
+    /// Offers removal of the existing installation at the right end of the footer row.
     fn uninstall_link(&mut self, ui: &mut Ui, ctx: &egui::Context, row: Rect) {
         let (Some(version), Some(uninstaller)) = (self.view.installed.clone(), self.view.uninstaller.clone()) else {
             return;
@@ -777,10 +759,7 @@ impl App {
         let clicked = ui
             .scope_builder(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)), |ui| {
                 text_link(ui, &format!("{}{version}", tr("卸载 v", "Uninstall v")))
-                    .on_hover_text(tr(
-                        "打开已安装版本的卸载程序，可以选择是否同时删除数据。",
-                        "Opens the installed version's uninstaller, which asks whether to delete the data too.",
-                    ))
+                    .on_hover_text(tr("卸载程序并保留所有用户数据。", "Uninstall the program and keep all user data."))
                     .clicked()
             })
             .inner;
@@ -813,11 +792,8 @@ impl App {
                 ui.add_space(4.0);
                 ui.add(egui::Label::new(RichText::new(&self.dir_text).size(12.5).color(p.muted)).truncate());
                 ui.add_space(18.0);
-                let label = format!("{}{}", tr("同时删除", "Also delete "), self.view.data_label);
-                checkbox(ui, &mut self.delete_data, &label, 12.5).on_hover_text(tr(
-                    "删除后无法恢复。不勾选则保留，重新安装后可继续使用。",
-                    "This cannot be undone. Left unticked, they stay and work again after reinstalling.",
-                ));
+                let data = &self.view.data_label;
+                caption(ui, &format!("{data}{}", tr("会保留。", " are kept.")), 12.5);
                 ui.add_space(12.0);
                 let primary = if self.notice.is_some() {
                     tr("关闭并卸载", "Close and uninstall")
@@ -963,18 +939,10 @@ impl App {
                 Some((Badge::Success, title.to_string(), lines))
             }
             (Some(Done::Uninstalled { warnings }), _) => {
-                let first = if self.delete_data {
-                    format!(
-                        "{name}{}{label}{}",
-                        tr(" 及其", " and its "),
-                        tr("已从此电脑删除。", " were removed from this PC.")
-                    )
-                } else {
-                    crate::text::sentence(&format!(
-                        "{label}{}",
-                        tr("已保留，重新安装后可继续使用。", " were kept and work again after reinstalling.")
-                    ))
-                };
+                let first = crate::text::sentence(&format!(
+                    "{label}{}",
+                    tr("已保留，重新安装后可继续使用。", " were kept and work again after reinstalling.")
+                ));
                 let mut lines = vec![first];
                 lines.extend(warnings.iter().map(note));
                 Some((Badge::Success, format!("{name}{}", tr(" 已卸载", " was uninstalled")), lines))

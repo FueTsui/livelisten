@@ -1,8 +1,8 @@
 //! Where things go, and the isolated test mode (REL-06).
 //!
 //! In debug builds, `SETUP_TEST_ROOT=<folder>` redirects the install folder, Start menu,
-//! desktop, AppData and the registry (to `<folder>\registry.json`) into that folder, and
-//! skips Windows Credential Manager. Release builds never read the variable.
+//! desktop, AppData and the registry (to `<folder>\registry.json`) into that folder.
+//! Release builds never read the variable.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -105,6 +105,20 @@ impl Env {
             .map(|(k, v)| (k.clone(), v.replace("{roamingAppData}", &roaming).replace("{localAppData}", &local)))
             .collect()
     }
+}
+
+/// True if an install path would put program files in a product data folder.
+pub fn in_data_dir(dir: &Path, env: &Env, product: &Product) -> bool {
+    let inside = |dir: &Path, data: &Path| crate::process::same_path(dir, data) || crate::process::inside(dir, data);
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    product.data_dirs.iter().any(|data| {
+        let data = env.data_dir(data);
+        inside(&absolute, &data)
+            || std::fs::canonicalize(dir)
+                .ok()
+                .zip(std::fs::canonicalize(data).ok())
+                .is_some_and(|(dir, data)| inside(&dir, &data))
+    })
 }
 
 /// Folders an installation must never replace or empty, whatever `/DIR=` says.

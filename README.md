@@ -8,7 +8,7 @@
 
 说话即写入当前输入框；电脑里播放的声音实时变成字幕；一句话记成桌面卡片。
 
-![Version](https://img.shields.io/badge/version-0.1.1-blue)
+![Version](https://img.shields.io/badge/version-0.1.2-blue)
 [![GitHub Release](https://img.shields.io/github/v/release/FueTsui/livelisten)](https://github.com/FueTsui/livelisten/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -48,7 +48,7 @@
 1. **先核对校验值**：
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.2-x64.exe -Algorithm SHA256
    ```
 
    结果应与 `SHA256SUMS.txt` 中对应行一致；不一致时不要运行。
@@ -58,7 +58,7 @@
 - 系统要求：Windows 11 x64；需要可用的音频设备和麦克风权限，在线识别需要网络。
 - 默认安装到 `%LOCALAPPDATA%\Programs\LiveListen`，并创建开始菜单快捷方式。
 - 升级：运行新版安装包即可。正在运行的程序会先被请求正常退出；保留设置、卡片、密钥以及快捷方式和开机启动选项。替换失败时恢复全部原文件，旧版本仍可使用。
-- 卸载：在 Windows「已安装的应用」中找到「LiveListen」并卸载，或运行安装包并点击窗口右下角的「卸载 v版本号」。默认保留设置、卡片和密钥，勾选后一并删除。
+- 卸载：在 Windows「已安装的应用」中找到「LiveListen」并卸载，或运行安装包并点击窗口右下角的「卸载 v版本号」。卸载保留设置、卡片、随手记文档和密钥。
 - 便携包：完整解压到新的普通文件夹后运行 `LiveListen.exe`，不要只复制 EXE 或在压缩包内运行。
 
 包内已带 .NET、Windows App SDK、嵌入式 Python 及依赖，无需另装运行时。静默安装参数、退出码和日志位置见 [安装与卸载](docs/INSTALLATION.md)。
@@ -72,7 +72,9 @@
 | 按住右 <kbd>Ctrl</kbd> | 听写：说话写入当前输入框，松开结束 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | 开始或结束持续听写 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | 开关实时字幕 |
-| 轻按右 <kbd>Alt</kbd> | 记一句随手记，松开触发 |
+| 按住 <kbd>Ctrl</kbd>+<kbd>←</kbd> | 录随手记，松开左方向键后结束并保存 |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | 启动托盘同款随手记录音，再按或按普通键结束 |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> | 在桌面新建空白随手记并打开编辑器 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | 显示或隐藏卡片 |
 
 - 快捷键可在设置中直接点击键值输入框录入，松开按键后保存；按 Esc 或移开焦点取消，输入框右侧的清除按钮可禁用该项。
@@ -135,6 +137,7 @@
 | 设置 | `settings.get`、`settings.set` | `config`（只读） | — | 读取 / 本地写入 |
 | 听写 | `dictation.start/toggle/stop/cancel` | — | — | 音频外发、写入目标输入框 |
 | 字幕 | `captions.toggle/set/lines` | — | — | 音频外发 |
+| 语音随手记 | `note.toggle` | — | — | 音频外发、本地写入卡片 |
 | 卡片 | `cards.list/add/update/styles.clear/show/delete` | — | — | 本地写入；删除不可恢复 |
 | 凭据 | `secret.set/delete/status` | — | — | 写入 Windows 凭据管理器 |
 | 诊断 | `diagnostics.export` | — | — | 本地文件写入 |
@@ -154,6 +157,7 @@ const char *ll_version(void);
 
 - 请求形如 `{"cmd":"providers"}`；成功回复带 `"ok":true`，失败为 `{"ok":false,"error":"<错误码>"}`。
 - `ll_start` 失败时返回 NULL。事件在引擎线程上回调，回调应尽快返回并复制字符串。
+- `cards.add` 可传入 `"editOnDesktop":true`，显示桌面卡片并在 `cards.changed` 事件中返回待编辑的 `editCard`。
 - 文本协议见 [识别桥接协议](docs/PROVIDER_PROTOCOL.md)。
 
 ### CLI
@@ -191,8 +195,9 @@ live-listen config
 | `/UPDATE` | 只升级已有安装；程序在运行时等它退出，之后重新启动 |
 | `/NOLAUNCH` | 完成后不启动程序；静默安装本来就不启动 |
 | `/VERIFY` | 只校验安装包后退出 |
+| `/UNINSTALL` | 使用当前安装包卸载已有安装并保留用户数据 |
 
-退出码：0 成功；1 安装包损坏或参数无效；2 用户取消；3 失败并已回滚；7 无法关闭正在运行的程序，未替换任何文件。卸载程序支持 `/SILENT`、`/VERYSILENT`、`/SUPPRESSMSGBOXES`、`/LOG`、`/DELETEDATA`。脚本中请用 `Start-Process -Wait -PassThru` 读取退出码。
+退出码：0 成功；1 安装包损坏或参数无效；2 用户取消；3 失败并已回滚；7 无法关闭正在运行的程序，未替换任何文件。卸载程序支持 `/SILENT`、`/VERYSILENT`、`/SUPPRESSMSGBOXES` 和 `/LOG`，并保留设置、随手记卡片、Markdown 文档和已保存的密钥。脚本中请用 `Start-Process -Wait -PassThru` 读取退出码。
 
 ### 启动参数
 
@@ -214,7 +219,7 @@ live-listen config
 
 | 名称 | 作用 |
 | --- | --- |
-| `%APPDATA%\LiveListen\settings.json` | 设置，结构版本 3；`dictation.preconnectLevel` 为 `off`、`balanced` 或 `aggressive` |
+| `%APPDATA%\LiveListen\settings.json` | 设置，结构版本 5，`dictation.preconnectLevel` 为 `off`、`balanced` 或 `aggressive` |
 | Windows 凭据管理器 | 官方识别服务的密钥，在设置中填写；不进入配置文件、命令行或日志 |
 | `LIVE_LISTEN_CONFIG_DIR` | 测试用：设置、卡片和日志改放到该目录，作为独立实例运行，不写开机启动项；凭据仍与正式实例共用 |
 | `LIVE_LISTEN_TEST_AUDIO` / `LIVE_LISTEN_TEST_CAPTIONS_AUDIO` | 测试用：用 WAV 文件代替听写 / 字幕音频；音频仍会发给真实识别服务 |

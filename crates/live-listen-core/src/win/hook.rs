@@ -51,6 +51,8 @@ pub struct Bindings {
     pub toggle: Option<Binding>,
     pub captions: Option<Binding>,
     pub note: Option<Binding>,
+    pub note_toggle: Option<Binding>,
+    pub note_blank: Option<Binding>,
     pub cards: Option<Binding>,
 }
 
@@ -62,13 +64,16 @@ impl Bindings {
             toggle: parse(&hotkeys.toggle),
             captions: parse(&hotkeys.captions),
             note: parse(&hotkeys.note),
+            note_toggle: parse(&hotkeys.note_toggle),
+            note_blank: parse(&hotkeys.note_blank),
             cards: parse(&hotkeys.cards),
         }
     }
 
     fn apply(&self, matcher: &mut Matcher) {
         matcher.set_bindings(self.hold, self.toggle, self.captions);
-        matcher.set_more(self.note, self.cards);
+        matcher.set_notes(self.note, self.note_toggle, self.note_blank);
+        matcher.cards = self.cards;
     }
 }
 
@@ -419,7 +424,6 @@ impl State {
         self.dictating
             || matches!(self.mode, Mode::Continuous { .. } | Mode::Buffering)
             || self.matcher.next_deadline().is_some()
-            || self.matcher.watching_modifier_tap()
     }
 
     fn has_held_input(&self) -> bool {
@@ -984,7 +988,7 @@ mod tests {
     fn capture_foreground_loss_does_not_resume_on_return() {
         let now = Instant::now();
         let mut s = state(Box::new(|_| {}));
-        s.matcher.set_more(Some(Binding::parse("RAlt").unwrap()), None);
+        s.matcher.set_notes(Some(Binding::parse("RAlt").unwrap()), None, None);
         let reply = capture(&mut s, true, 0, now);
         assert_eq!(s.matcher.key(vk::RMENU, true, Mode::Normal, now), Default::default());
         s.check_capture_owner(43, now);
@@ -1012,9 +1016,9 @@ mod tests {
     }
 
     #[test]
-    fn note_modifier_requests_mouse_tracking_until_cancelled() {
+    fn armed_note_modifier_requests_mouse_tracking_until_cancelled() {
         let mut s = state(Box::new(|_| {}));
-        s.matcher.set_more(Some(Binding::parse("RAlt").unwrap()), None);
+        s.matcher.set_notes(Some(Binding::parse("RAlt").unwrap()), None, None);
         assert!(!s.wants_mouse());
         s.matcher.key(vk::RMENU, true, Mode::Normal, Instant::now());
         assert!(s.wants_mouse());

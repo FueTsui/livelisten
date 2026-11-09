@@ -147,13 +147,32 @@ impl Core {
     }
 
     fn emit_cards(&self) {
-        self.emit(json!({
+        self.emit_cards_with_editor(None);
+    }
+
+    fn emit_cards_with_editor(&self, edit_card: Option<u64>) {
+        let mut event = json!({
             "event": "cards.changed",
             "cards": self.notes.cards.cards,
             "showOnDesktop": self.notes.cards.show_on_desktop,
             "markdownPending": self.notes.markdown_dirty,
             "markdownError": if self.notes.markdown_reported { CARD_MARKDOWN_FAILED } else { "" },
-        }));
+        });
+        if let Some(id) = edit_card {
+            event["editCard"] = json!(id);
+        }
+        self.emit(event);
+    }
+
+    pub(super) fn add_card(&mut self, kind: CardKind, text: &str, edit_on_desktop: bool) -> Result<u64, String> {
+        let id = self.notes.cards.add(kind, text, paths::timestamp(), paths::unix_ms());
+        self.notes.markdown_dirty = true;
+        if edit_on_desktop {
+            self.notes.cards.show_on_desktop = true;
+        }
+        let saved = self.save_cards();
+        self.emit_cards_with_editor(edit_on_desktop.then_some(id));
+        saved.map(|()| id)
     }
 
     /// A spoken note finished: keep it as a note or to-do card.
@@ -213,11 +232,8 @@ impl Core {
             })),
             "cards.add" => {
                 let kind = if text_of(request, "kind") == "todo" { CardKind::Todo } else { CardKind::Note };
-                let card = self.notes.cards.add(kind, text_of(request, "text"), paths::timestamp(), paths::unix_ms());
-                self.notes.markdown_dirty = true;
-                let saved = self.save_cards();
-                self.emit_cards();
-                saved.map(|()| json!({"id": card}))
+                let edit_on_desktop = request["editOnDesktop"].as_bool().unwrap_or(false);
+                self.add_card(kind, text_of(request, "text"), edit_on_desktop).map(|id| json!({"id": id}))
             }
             "cards.update" => match id_of(request, "id") {
                 Ok(card) => {
@@ -314,6 +330,28 @@ mod tests {
 
     fn errors(events: &Mutex<Vec<Value>>, code: &str) -> usize {
         events.lock().unwrap().iter().filter(|e| e["event"] == "error" && e["code"] == code).count()
+    }
+
+    #[test]
+    fn blank_note_shortcut_shows_and_edits_a_persisted_empty_note() {
+        let dir = temp_dir("blank-shortcut");
+        let (mut core, events, _rx) = core(&dir);
+        core.set_cards_shown(false);
+        core.on_signal(crate::hotkey::Signal::NoteBlank);
+
+        assert!(core.dictation.is_none(), "blank cards do not start recognition");
+        let book = CardBook::load(&dir.join("cards.json"));
+        assert!(book.show_on_desktop);
+        assert_eq!(book.cards.len(), 1);
+        let card = &book.cards[0];
+        assert!(card.visible && card.text.is_empty());
+        assert_eq!(card.kind, CardKind::Note);
+        let events = events.lock().unwrap();
+        let change = events.iter().rfind(|e| e["event"] == "cards.changed").unwrap();
+        assert_eq!(change["editCard"], card.id);
+        assert_eq!(change["showOnDesktop"], true);
+        drop(core);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -528,7 +528,6 @@ internal sealed class CardsHost(App app)
     private long styleRevision;
     private bool flushing;
     private bool creatingCard;
-    private ulong? newCardToEdit;
     private static CardsHost? clickWatcher;
     private CardWindow? emptyCard;
     private nint emptyClickHook;
@@ -547,7 +546,6 @@ internal sealed class CardsHost(App app)
     public void Apply(JsonObject e)
     {
         Shown = e["showOnDesktop"].Bool();
-        if (!Shown) newCardToEdit = null;
         MarkdownError = e["markdownError"].Str();
         Cards = (e["cards"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         RetireStyles();
@@ -583,12 +581,13 @@ internal sealed class CardsHost(App app)
             }
             index++;
         }
-        EditNewCardWhenReady();
+        if (Shown && !flushing && e["editCard"]?.GetValue<ulong>() is { } idToEdit
+            && windows.TryGetValue(idToEdit, out var newCard)) newCard.EditNewCard();
     }
 
     public void CreateDesktopCard()
     {
-        if (app.Exiting || !Shown || creatingCard || newCardToEdit is not null) return;
+        if (app.Exiting || !Shown || creatingCard) return;
         creatingCard = true;
         Track(CreateDesktopCardAsync());
     }
@@ -597,29 +596,17 @@ internal sealed class CardsHost(App app)
     {
         try
         {
-            var reply = await app.Engine.CallAsync("cards.add", new JsonObject { ["text"] = "", ["kind"] = "note" });
-            if (reply.Ok())
-            {
-                if (!app.Exiting && Shown)
-                {
-                    newCardToEdit = reply["id"]?.GetValue<ulong>();
-                    EditNewCardWhenReady();
-                }
-            }
-            else if (!app.Exiting) app.Bar.ShowMessage(Loc.Error(reply["error"].Str("save_failed")), true);
+            var reply = await app.Engine.CallAsync("cards.add", new JsonObject { ["editOnDesktop"] = true });
+            // Save errors are also emitted by the engine, with the unsaved card still available.
+            var error = reply["error"].Str("save_failed");
+            if (!reply.Ok() && !app.Exiting && error is not ("card_save_failed" or "card_markdown_failed"))
+                app.Bar.ShowMessage(Loc.Error(error), true);
         }
         catch (Exception)
         {
             if (!app.Exiting) app.Bar.ShowMessage(Loc.Error("save_failed"), true);
         }
         finally { creatingCard = false; }
-    }
-
-    private void EditNewCardWhenReady()
-    {
-        if (newCardToEdit is not { } id || !Shown || app.Exiting || !windows.TryGetValue(id, out var window)) return;
-        newCardToEdit = null;
-        window.EditNewCard();
     }
 
     // Watch one cleared draft at a time. No click hook is needed while its text is nonempty.

@@ -269,16 +269,23 @@ public partial class App : Application
 
     private IReadOnlyList<TrayItem> BuildMenu() => exiting ? [] :
     [
-        new(Dictating ? Loc.T("tray.stop") : Loc.T("tray.dictate"), ToggleDictation),
-        new(Loc.T("tray.captions"), ToggleCaptions, CaptionsOn),
-        new(Loc.T("tray.note"), ToggleNote),
+        new(TrayShortcutLabel(Dictating ? "tray.stop" : "tray.dictate", "toggle"), ToggleDictation),
+        new(TrayShortcutLabel("tray.captions", "captions"), ToggleCaptions, CaptionsOn),
+        new(TrayShortcutLabel("tray.note", "noteToggle"), ToggleNote),
         TrayItem.Separator,
         new(Loc.T("tray.showDictation"), ToggleDictationText, Settings.Bool("dictation.showText")),
-        new(Loc.T("tray.cards"), ToggleCards, Cards.Shown),
+        new(TrayShortcutLabel("tray.cards", "cards"), ToggleCards, Cards.Shown),
         TrayItem.Separator,
         new(Loc.T("tray.settings"), () => OpenSettings()),
         new(Loc.T("tray.exit"), Quit),
     ];
+
+    private string TrayShortcutLabel(string labelKey, string shortcutField)
+    {
+        var label = Loc.T(labelKey);
+        var shortcut = Settings.Str("hotkeys." + shortcutField);
+        return string.IsNullOrWhiteSpace(shortcut) ? label : label + "\t" + Theme.Keys(shortcut);
+    }
 
     internal void ToggleDictation() { if (!exiting) _ = Engine.CallAsync("dictation.toggle"); }
 

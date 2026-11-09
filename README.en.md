@@ -39,11 +39,11 @@ Download `LiveListen-Setup-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub 
 1. Compare the following SHA-256 value with the matching entry in `SHA256SUMS.txt`.
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.2-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer and choose **Install now**. The default path is `%LOCALAPPDATA%\Programs\LiveListen`. Custom options let you change the folder, shortcuts, startup, and whether to launch after installation.
-3. Use **Settings → Apps → Installed apps → LiveListen** to uninstall. The uninstaller keeps settings, cards, and credentials by default.
+3. Use **Settings → Apps → Installed apps → LiveListen** to uninstall. Uninstalling keeps settings, cards, note documents, and saved credentials.
 
 The build is unsigned, so Windows may show a SmartScreen prompt. Verify the source and checksum before running it. Upgrades preserve settings, cards, credentials, and startup and shortcut options. If file replacement fails, the installer restores the previous version.
 
@@ -58,7 +58,9 @@ Open **Settings** from the tray, select a microphone and speech provider, then p
 | Hold right <kbd>Ctrl</kbd> | Dictate into the active text field. Release to finish. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | Start or stop continuous dictation. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle live captions. |
-| Tap right <kbd>Alt</kbd> | Record a voice note on release. |
+| Hold <kbd>Ctrl</kbd>+<kbd>Left</kbd> | Record a voice note. Release the left arrow to finish and save. |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | Start a voice note like the tray command. Press again or press a regular key to finish. |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> | Create and edit a blank desktop note. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | Show or hide desktop cards. |
 
 Click a shortcut field in Settings and press the new key or combination; releasing the keys saves it. Escape or moving focus cancels recording, and the clear button disables that action's shortcut. A single click on the tray icon shows or hides the voice overlay. In the tray context menu, **Show dictation** controls the same setting as **Show live text in the bar**.

@@ -1,6 +1,6 @@
 # 安装、升级与卸载
 
-适用于 LiveListen 0.1.1。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
+适用于 LiveListen 0.1.2。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
 
 ## 系统要求
 
@@ -12,10 +12,10 @@
 
 ## 核对校验值
 
-安装包 `LiveListen-Setup-0.1.1-x64.exe`、便携包 `LiveListen-0.1.1-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
+安装包 `LiveListen-Setup-0.1.2-x64.exe`、便携包 `LiveListen-0.1.2-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
 
 ```powershell
-Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
+Get-FileHash .\LiveListen-Setup-0.1.2-x64.exe -Algorithm SHA256
 ```
 
 结果应与 `SHA256SUMS.txt` 中对应行一致，不一致时不要运行。校验值只证明文件没有变化，不能代替发布者签名或可信来源。
@@ -42,7 +42,7 @@ Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
 
 运行新版本安装包即可升级。窗口会显示「将从 vX 升级」，安装位置沿用当前安装。
 
-- 程序正在运行时，窗口先提示，按钮变为「关闭并安装」。安装程序按完整路径找到这一安装中的进程，先请它正常退出（保存设置和卡片），15 秒后仍未退出才结束它。其他文件夹中同名的程序不受影响。
+- 程序正在运行时，窗口先提示，按钮变为「关闭并安装」。安装程序按完整路径找到这一安装中的进程，先请它正常退出（保存设置和卡片），等待正常退出。应用仍在运行时，安装或卸载会停止并返回 7。其他文件夹中同名的程序不受影响。
 - 新文件全部解压并校验后才开始替换。任一文件替换失败时恢复全部原文件，旧版本仍可启动。
 - 设置、卡片、密钥、快捷方式和开机启动选项保持不变；你自己放进安装目录的文件不会被删除。
 - 运行同版本安装包为「重新安装」，用于修复损坏的程序文件。
@@ -56,7 +56,7 @@ Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
 - 运行安装包，点击窗口右下角的「卸载 v版本号」；
 - 运行安装目录中的 `Uninstall.exe`。
 
-默认保留设置、卡片和已保存的密钥，重新安装后可继续使用。勾选「同时删除设置、随手记卡片和已保存的密钥」会删除 `%APPDATA%\LiveListen`、`%LOCALAPPDATA%\LiveListen` 以及凭据管理器中本程序的凭据，无法恢复。
+卸载保留设置、`cards.json`、随手记 Markdown 文档和已保存的密钥，重新安装后可继续使用。卸载早期版本时，可以从新版安装包点「卸载 v版本号」，使用新版的数据保留规则。
 
 卸载程序只删除安装时记录的文件和指向本安装的开机启动项。它退出后，临时文件夹中的副本会删除 `Uninstall.exe` 和空的安装目录，然后删除自身。
 
@@ -74,6 +74,7 @@ Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
 | `/UPDATE` | 只升级已有安装；没有安装或版本更低时失败 |
 | `/NOLAUNCH` | 完成后不启动程序 |
 | `/VERIFY` | 只校验安装包后退出 |
+| `/UNINSTALL` | 使用当前安装包卸载已有安装并保留用户数据 |
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -84,13 +85,13 @@ Get-FileHash .\LiveListen-Setup-0.1.1-x64.exe -Algorithm SHA256
 | 7 | 无法关闭正在运行的程序，没有替换任何文件 |
 
 - 静默安装不会自动启动程序。`/UPDATE` 只在升级前程序正在运行时重新启动它；`/NOLAUNCH` 禁止重新启动。
-- 静默模式需要关闭正在运行的程序时，会先弹窗确认；加 `/SUPPRESSMSGBOXES` 时直接关闭。`/UPDATE` 最多等程序自行退出 120 秒，从不强制结束，超时返回 7。
-- 卸载程序支持 `/SILENT`、`/VERYSILENT`、`/SUPPRESSMSGBOXES`、`/LOG` 和 `/DELETEDATA`（同时删除数据）。
+- 安装和卸载会请求程序保存并退出。静默模式下可用 `/SUPPRESSMSGBOXES` 跳过提示。`/UPDATE` 等待正常退出的时间为 120 秒，超时返回 7。
+- 卸载程序支持 `/SILENT`、`/VERYSILENT`、`/SUPPRESSMSGBOXES` 和 `/LOG`。为兼容旧脚本，新版接受并忽略 `/DELETEDATA`。
 
 在 PowerShell 中读取退出码：
 
 ```powershell
-$p = Start-Process .\LiveListen-Setup-0.1.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
+$p = Start-Process .\LiveListen-Setup-0.1.2-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
 $p.ExitCode
 ```
 
@@ -105,14 +106,14 @@ $p.ExitCode
 不想安装时，可使用便携包：
 
 ```powershell
-Expand-Archive -LiteralPath .\LiveListen-0.1.1-portable-x64.zip -DestinationPath .\LiveListen-0.1.1
-.\LiveListen-0.1.1\LiveListen\LiveListen.exe
+Expand-Archive -LiteralPath .\LiveListen-0.1.2-portable-x64.zip -DestinationPath .\LiveListen-0.1.2
+.\LiveListen-0.1.2\LiveListen\LiveListen.exe
 ```
 
 - 完整解压到一个新的普通文件夹，不要只复制 EXE，也不要在压缩包内运行。
 - 便携指程序免安装，设置和卡片仍保存在 `%APPDATA%\LiveListen`。
 - 更新时先从托盘「退出」，再把新版本解压到另一个文件夹；保留旧文件夹便于回退。
-- 卸载时先关闭开机启动并退出，再删除解压的文件夹；设置、卡片和凭据默认保留。
+- 卸载时先关闭开机启动并退出，再删除解压的文件夹；设置、卡片、随手记文档和凭据会保留。
 
 ## 首次使用
 

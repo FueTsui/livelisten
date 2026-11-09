@@ -116,8 +116,8 @@ impl Mods {
     }
 }
 
-/// A shortcut: modifiers plus one key. A lone side-specific modifier such as `RCtrl` is valid
-/// for hold-to-talk only, because a modifier tap cannot be swallowed without side effects.
+/// A shortcut: modifiers plus one key. A lone side-specific modifier such as `RCtrl` is
+/// supported by the two hold actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Binding {
     pub mods: Mods,
@@ -281,8 +281,12 @@ pub enum Signal {
     HoldDisarmed,
     Toggle,
     Captions,
-    /// Start or end a spoken note.
-    Note,
+    NoteHoldStart,
+    NoteHoldEnd,
+    /// Same action as the tray's spoken note entry.
+    NoteToggle,
+    /// Open a blank note card for editing on the desktop.
+    NoteBlank,
     /// Show or hide the desktop cards.
     Cards,
     /// Continuous dictation was ended by this key; replay it after the last text if asked.
@@ -338,6 +342,13 @@ enum Hold {
     Suppressed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoteHold {
+    Idle,
+    Armed { key: u16, since: Instant },
+    Active(u16),
+}
+
 #[derive(Clone, Debug, Default)]
 struct Recording {
     mods_seen: Vec<u16>,
@@ -351,6 +362,8 @@ pub struct Matcher {
     pub toggle: Option<Binding>,
     pub captions: Option<Binding>,
     pub note: Option<Binding>,
+    pub note_toggle: Option<Binding>,
+    pub note_blank: Option<Binding>,
     pub cards: Option<Binding>,
     /// How long a lone modifier must be held before dictation starts.
     pub hold_delay: Duration,
@@ -359,7 +372,7 @@ pub struct Matcher {
     swallow_up: Vec<u16>,
     swallow_mouse_up: bool,
     pending_tap: Option<u16>,
-    note_tap: Option<u16>,
+    note_hold: NoteHold,
     capturing: bool,
     capture_guard: Option<Instant>,
     recording: Recording,
@@ -376,6 +389,8 @@ impl Default for Matcher {
             toggle: None,
             captions: None,
             note: None,
+            note_toggle: None,
+            note_blank: None,
             cards: None,
             hold_delay: Duration::from_millis(250),
             pressed: Vec::new(),
@@ -383,7 +398,7 @@ impl Default for Matcher {
             swallow_up: Vec::new(),
             swallow_mouse_up: false,
             pending_tap: None,
-            note_tap: None,
+            note_hold: NoteHold::Idle,
             capturing: false,
             capture_guard: None,
             recording: Recording::default(),
@@ -410,14 +425,22 @@ impl Matcher {
         self.toggle = toggle;
         self.captions = captions;
         self.hold_state = Hold::Idle;
-        self.note_tap = None;
     }
 
-    /// Replaces the note and cards shortcuts.
-    pub fn set_more(&mut self, note: Option<Binding>, cards: Option<Binding>) {
+    /// Replaces the note bindings while allowing an already active hold to finish.
+    pub fn set_notes(&mut self, note: Option<Binding>, toggle: Option<Binding>, blank: Option<Binding>) {
+        if self.note != note {
+            self.disarm_note();
+        }
         self.note = note;
-        self.cards = cards;
-        self.note_tap = None;
+        self.note_toggle = toggle;
+        self.note_blank = blank;
+    }
+
+    fn disarm_note(&mut self) {
+        if matches!(self.note_hold, NoteHold::Armed { .. }) {
+            self.note_hold = NoteHold::Idle;
+        }
     }
 
     /// Side-independent modifiers currently held, excluding `except`.
@@ -441,16 +464,27 @@ impl Matcher {
         if let Some(until) = self.capture_guard {
             return self.pressed.is_empty().then_some(until);
         }
-        match self.hold_state {
-            Hold::Armed(since) => Some(since + self.hold_delay),
+        let dictation = match self.hold_state {
+            Hold::Armed(since) => Some(since),
             _ => None,
-        }
+        };
+        let note = match self.note_hold {
+            NoteHold::Armed { since, .. } => Some(since),
+            _ => None,
+        };
+        dictation.into_iter().chain(note).min().map(|since| since + self.hold_delay)
     }
 
-    /// Starts dictation once a lone modifier has been held long enough.
+    /// Starts recording once a lone modifier has been held long enough.
     pub fn tick(&mut self, now: Instant) -> Vec<Signal> {
         if self.capture_suppressed(now) {
             return Vec::new();
+        }
+        if let NoteHold::Armed { key, since } = self.note_hold {
+            if now >= since + self.hold_delay {
+                self.note_hold = NoteHold::Active(key);
+                return vec![Signal::NoteHoldStart];
+            }
         }
         match self.hold_state {
             Hold::Armed(since) if now >= since + self.hold_delay => {
@@ -486,7 +520,7 @@ impl Matcher {
         self.capturing = true;
         self.capture_guard = None;
         self.pending_tap = None;
-        self.note_tap = None;
+        self.disarm_note();
         match std::mem::replace(&mut self.hold_state, Hold::Idle) {
             Hold::Armed(_) => vec![Signal::HoldDisarmed],
             _ => Vec::new(),
@@ -511,10 +545,6 @@ impl Matcher {
         false
     }
 
-    pub fn watching_modifier_tap(&self) -> bool {
-        self.note_tap.is_some()
-    }
-
     /// The hold modifier to let go of in the system, once.
     pub fn take_release(&mut self) -> Option<u16> {
         self.release_due.take()
@@ -523,6 +553,9 @@ impl Matcher {
     /// Consumes a pending swallow for this key-up while input is buffered.
     pub fn take_up(&mut self, key: u16) -> bool {
         self.pressed.retain(|&k| k != key);
+        if self.note_hold == NoteHold::Active(key) {
+            self.note_hold = NoteHold::Idle;
+        }
         if self.released == Some(key) {
             self.released = None;
         }
@@ -549,26 +582,29 @@ impl Matcher {
         self.swallow_up.clear();
         self.swallow_mouse_up = false;
         self.pending_tap = None;
-        self.note_tap = None;
+        let note = std::mem::replace(&mut self.note_hold, NoteHold::Idle);
         self.released = None;
         self.release_due = None;
         self.recording = Recording::default();
-        match std::mem::replace(&mut self.hold_state, Hold::Idle) {
-            Hold::Armed(_) => vec![Signal::HoldDisarmed],
-            Hold::Active => vec![Signal::HoldEnd],
-            Hold::Idle | Hold::Suppressed => Vec::new(),
-        }
+        let dictation = match std::mem::replace(&mut self.hold_state, Hold::Idle) {
+            Hold::Armed(_) => Some(Signal::HoldDisarmed),
+            Hold::Active => Some(Signal::HoldEnd),
+            Hold::Idle | Hold::Suppressed => None,
+        };
+        dictation.into_iter().chain(matches!(note, NoteHold::Active(_)).then_some(Signal::NoteHoldEnd)).collect()
     }
 
-    /// True while hold-to-talk dictation is running.
+    /// True while a hold action is recording.
     pub fn holding(&self) -> bool {
-        self.hold_state == Hold::Active
+        self.hold_state == Hold::Active || matches!(self.note_hold, NoteHold::Active(_))
     }
 
     /// Resets per-session state when the engine changes mode.
     pub fn enter(&mut self, mode: Mode) {
         self.pending_tap = None;
-        self.note_tap = None;
+        if mode != Mode::Normal {
+            self.disarm_note();
+        }
         if mode == Mode::Recording {
             self.recording = Recording::default();
             self.hold_state = Hold::Idle;
@@ -612,22 +648,17 @@ impl Matcher {
         if repeat {
             return if self.swallow_up.contains(&key) { Decision::swallow(false) } else { Decision::pass() };
         }
-        // A note modifier is a lone tap, never the prefix of an AltGr/OS/app chord.
-        self.note_tap = None;
-        if self.note.is_some_and(|b| b.is_modifier_only() && b.key == key)
-            && self.pressed.len() == 1
-            && mode == Mode::Normal
-            && self.hold_state == Hold::Idle
-        {
-            self.note_tap = Some(key);
-        }
+        // A lone note modifier must stay alone until the timer fires. In particular,
+        // AltGr's Ctrl+Alt pair and a quick Alt chord must not start recording.
+        self.disarm_note();
         let mods = self.mods(key);
         let mask = mods.alt || mods.win;
         // Shortcuts first, so they keep working during continuous dictation.
         let shortcuts = [
             (self.toggle, Signal::Toggle),
             (self.captions, Signal::Captions),
-            (self.note, Signal::Note),
+            (self.note_toggle, Signal::NoteToggle),
+            (self.note_blank, Signal::NoteBlank),
             (self.cards, Signal::Cards),
         ];
         for (binding, signal) in shortcuts {
@@ -639,8 +670,22 @@ impl Matcher {
                 }
             }
         }
+        if mode == Mode::Normal && self.hold_state == Hold::Idle && self.note_hold == NoteHold::Idle {
+            if let Some(b) = self.note.filter(|b| b.key == key && b.mods == mods) {
+                if b.is_modifier_only() {
+                    if self.pressed.len() == 1 {
+                        self.note_hold = NoteHold::Armed { key, since: now };
+                    }
+                } else {
+                    self.note_hold = NoteHold::Active(key);
+                    self.swallow_up.push(key);
+                    return Decision::swallow(mask).with(Signal::NoteHoldStart);
+                }
+            }
+        }
         let mut decision = Decision::pass();
-        let in_session = matches!(mode, Mode::Continuous { .. } | Mode::Buffering);
+        let in_session =
+            matches!(mode, Mode::Continuous { .. } | Mode::Buffering) || matches!(self.note_hold, NoteHold::Active(_));
         if let (Some(h), false) = (self.hold, in_session) {
             if key == h.key && h.is_modifier_only() {
                 if mods.is_empty() && self.hold_state == Hold::Idle {
@@ -690,12 +735,16 @@ impl Matcher {
 
     fn key_up(&mut self, key: u16, mode: Mode) -> Decision {
         let mut decision = Decision::pass();
-        if self.note_tap == Some(key) {
-            self.note_tap = None;
-            if mode == Mode::Normal && self.pressed.is_empty() {
+        match self.note_hold {
+            NoteHold::Armed { key: held, .. } if held == key => self.disarm_note(),
+            NoteHold::Active(held) if held == key => {
+                self.note_hold = NoteHold::Idle;
+                // Notes do not type into the foreground app, so the modifier can stay
+                // down during recording. Mask its release to keep Start and menus closed.
                 decision.mask = matches!(key, vk::LWIN | vk::RWIN | vk::LMENU | vk::RMENU);
-                decision = decision.with(Signal::Note);
+                decision = decision.with(Signal::NoteHoldEnd);
             }
+            _ => {}
         }
         if let Some(i) = self.swallow_up.iter().position(|&k| k == key) {
             self.swallow_up.remove(i);
@@ -762,7 +811,7 @@ impl Matcher {
             }
             return Decision::pass();
         }
-        self.note_tap = None;
+        self.disarm_note();
         if let Hold::Armed(_) = self.hold_state {
             self.hold_state = Hold::Suppressed;
             return Decision::pass().with(Signal::HoldDisarmed);
@@ -793,25 +842,32 @@ mod tests {
     }
 
     #[test]
-    fn note_modifier_fires_once_on_lone_release_with_mask() {
+    fn note_modifier_starts_once_after_hold_and_ends_on_release() {
         let mut m = matcher();
-        m.set_more(Some(b("RAlt")), None);
+        m.set_notes(Some(b("RAlt")), None, None);
         let now = Instant::now();
-        for _ in 0..4 {
-            let d = m.key(vk::RMENU, true, Mode::Normal, now);
-            assert_eq!(d, Decision::pass(), "down/repeats reach the OS but do not trigger");
-        }
-        assert!(m.watching_modifier_tap());
-        assert!(m.tick(now + Duration::from_secs(2)).is_empty(), "note has no hold timer");
-        let d = m.key(vk::RMENU, false, Mode::Normal, now);
-        assert_eq!(d.signals, [Signal::Note]);
-        assert!(d.mask);
-        assert!(!d.swallow, "hook masks then replays the release");
-        assert!(m.key(vk::RMENU, false, Mode::Normal, now).signals.is_empty());
+        let deadline = now + m.hold_delay;
+        assert_eq!(m.key(vk::RMENU, true, Mode::Normal, now), Decision::pass());
+        assert_eq!(m.key(vk::RMENU, false, Mode::Normal, now), Decision::pass(), "a tap does not record");
+        assert!(m.tick(deadline).is_empty());
+
+        assert_eq!(m.key(vk::RMENU, true, Mode::Normal, now), Decision::pass());
+        assert_eq!(m.next_deadline(), Some(deadline));
+        assert!(m.tick(deadline - Duration::from_millis(1)).is_empty());
+        assert_eq!(m.tick(deadline), [Signal::NoteHoldStart]);
+        assert!(m.tick(deadline).is_empty());
+        m.enter(Mode::Normal);
+        assert_eq!(m.key(vk::RMENU, true, Mode::Normal, deadline), Decision::pass(), "no restart on repeat");
+        assert_eq!(m.key(u16::from(b'A'), true, Mode::Normal, deadline), Decision::pass(), "other keys do not end it");
+        assert_eq!(m.mouse(1, true, 0, 0, false, Mode::Normal), Decision::pass());
+        let d = m.key(vk::RMENU, false, Mode::Normal, deadline);
+        assert_eq!(d.signals, [Signal::NoteHoldEnd]);
+        assert!(d.mask && !d.swallow, "the hook masks and replays the Alt release");
+        assert!(m.key(vk::RMENU, false, Mode::Normal, deadline).signals.is_empty());
     }
 
     #[test]
-    fn note_modifier_chords_altgr_and_mouse_never_trigger_note() {
+    fn quick_modifier_chords_altgr_and_mouse_cancel_pending_note_hold() {
         let now = Instant::now();
         for chord in [
             vec![vk::RMENU, u16::from(b'A')],
@@ -822,26 +878,28 @@ mod tests {
             vec![vk::RMENU, vk::LWIN],
         ] {
             let mut m = matcher();
-            m.set_more(Some(b("RAlt")), None);
+            m.set_notes(Some(b("RAlt")), None, None);
             for &key in &chord {
-                assert!(!m.key(key, true, Mode::Normal, now).signals.contains(&Signal::Note));
+                assert_eq!(m.key(key, true, Mode::Normal, now), Decision::pass());
             }
+            assert!(m.tick(now + m.hold_delay).is_empty(), "{chord:?}");
             for &key in chord.iter().rev() {
-                assert!(!m.key(key, false, Mode::Normal, now).signals.contains(&Signal::Note));
+                assert_eq!(m.key(key, false, Mode::Normal, now), Decision::pass());
             }
         }
         let mut m = matcher();
-        m.set_more(Some(b("RAlt")), None);
+        m.set_notes(Some(b("RAlt")), None, None);
         m.key(vk::RMENU, true, Mode::Normal, now);
         assert_eq!(m.mouse(1, true, 0, 0, true, Mode::Normal), Decision::pass());
-        assert!(!m.watching_modifier_tap());
+        assert!(m.next_deadline().is_none());
+        assert!(m.tick(now + m.hold_delay).is_empty());
         assert!(m.key(vk::RMENU, false, Mode::Normal, now).signals.is_empty());
     }
 
     #[test]
     fn capture_passes_keys_cancels_armed_hold_and_waits_for_release() {
         let mut m = matcher();
-        m.set_more(Some(b("RAlt")), None);
+        m.set_notes(Some(b("RAlt")), None, None);
         let now = Instant::now();
         m.key(vk::RCONTROL, true, Mode::Normal, now);
         assert_eq!(m.begin_capture(), [Signal::HoldDisarmed]);
@@ -856,13 +914,14 @@ mod tests {
             assert_eq!(m.key(key, false, Mode::Normal, later), Decision::pass());
         }
         assert_eq!(m.key(vk::RMENU, true, Mode::Normal, later), Decision::pass());
-        assert_eq!(m.key(vk::RMENU, false, Mode::Normal, later).signals, [Signal::Note]);
+        assert_eq!(m.tick(later + m.hold_delay), [Signal::NoteHoldStart]);
+        assert_eq!(m.key(vk::RMENU, false, Mode::Normal, later + m.hold_delay).signals, [Signal::NoteHoldEnd]);
     }
 
     #[test]
     fn capture_release_guard_covers_immediate_repeats_and_restarts() {
         let mut m = matcher();
-        m.set_more(Some(b("RAlt")), None);
+        m.set_notes(Some(b("RAlt")), None, None);
         let now = Instant::now();
         m.begin_capture();
         m.end_capture(now);
@@ -881,7 +940,7 @@ mod tests {
     #[test]
     fn capture_of_preheld_note_and_secure_desktop_reset_cannot_trigger() {
         let mut m = matcher();
-        m.set_more(Some(b("RAlt")), None);
+        m.set_notes(Some(b("RAlt")), None, None);
         let now = Instant::now();
         m.key(vk::RMENU, true, Mode::Normal, now);
         m.begin_capture();
@@ -892,7 +951,9 @@ mod tests {
         m.end_capture(now);
         assert!(m.reset_keys().is_empty());
         assert_eq!(m.key(vk::RMENU, true, Mode::Normal, now + Duration::from_secs(1)), Decision::pass());
-        assert_eq!(m.key(vk::RMENU, false, Mode::Normal, now + Duration::from_secs(1)).signals, [Signal::Note]);
+        assert_eq!(m.tick(now + Duration::from_secs(2)), [Signal::NoteHoldStart]);
+        assert_eq!(m.reset_keys(), [Signal::NoteHoldEnd]);
+        assert!(m.key(vk::RMENU, false, Mode::Normal, now + Duration::from_secs(2)).signals.is_empty());
     }
 
     #[test]
@@ -1081,9 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn note_and_cards_shortcuts_work_during_continuous_dictation() {
+    fn tray_note_and_card_shortcuts_are_independent_of_hold_and_work_in_continuous_mode() {
         let mut m = matcher();
-        m.set_more(Some(b("Ctrl+Alt+N")), Some(b("Ctrl+Alt+K")));
+        m.set_notes(Some(b("RAlt")), Some(b("Ctrl+Alt+N")), Some(b("Ctrl+Alt+L")));
+        m.cards = Some(b("Ctrl+Alt+K"));
         let t = Instant::now();
         let mode = Mode::Continuous { replay: false };
         m.enter(mode);
@@ -1091,9 +1153,29 @@ mod tests {
         m.key(vk::LMENU, true, mode, t);
         let d = m.key(u16::from(b'N'), true, mode, t);
         assert!(d.swallow);
-        assert_eq!(d.signals, vec![Signal::Note]);
+        assert_eq!(d.signals, vec![Signal::NoteToggle]);
         m.key(u16::from(b'N'), false, mode, t);
         assert_eq!(m.key(u16::from(b'K'), true, mode, t).signals, vec![Signal::Cards]);
+        m.key(u16::from(b'K'), false, mode, t);
+        assert_eq!(m.key(u16::from(b'L'), true, mode, t).signals, [Signal::NoteBlank]);
+        assert!(m.key(u16::from(b'L'), true, mode, t).signals.is_empty(), "repeat does not add more cards");
+        assert!(m.key(u16::from(b'L'), false, mode, t).swallow);
+    }
+
+    #[test]
+    fn a_custom_note_chord_ends_on_release_even_after_rebinding() {
+        let mut m = matcher();
+        m.set_notes(Some(b("Ctrl+N")), None, None);
+        let now = Instant::now();
+        m.key(vk::LCONTROL, true, Mode::Normal, now);
+        let started = m.key(u16::from(b'N'), true, Mode::Normal, now);
+        assert!(started.swallow);
+        assert_eq!(started.signals, [Signal::NoteHoldStart]);
+        m.set_notes(Some(b("RAlt")), None, None);
+        assert!(m.key(vk::LCONTROL, false, Mode::Normal, now).signals.is_empty());
+        let stopped = m.key(u16::from(b'N'), false, Mode::Normal, now);
+        assert!(stopped.swallow);
+        assert_eq!(stopped.signals, [Signal::NoteHoldEnd]);
     }
 
     #[test]

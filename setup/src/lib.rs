@@ -22,11 +22,11 @@ pub mod uninstall;
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use args::Args;
-use install::{CLOSE_TIMEOUT, Failure, Plan, Quiet, Report, UPDATE_CLOSE_TIMEOUT, Unattended};
-use manifest::Role;
+use install::{CLOSE_TIMEOUT, Failure, Plan, Quiet, Report, UPDATE_CLOSE_TIMEOUT};
+use manifest::{Product, Role};
 use paths::Env;
 use payload::Package;
 use text::tr;
@@ -114,7 +114,7 @@ pub fn run() -> i32 {
     };
     let m = &package.manifest;
     if log::path().is_none() {
-        let role = if m.role == Role::Uninstaller { "Uninstall" } else { "Setup" };
+        let role = if m.role == Role::Uninstaller || args.uninstall { "Uninstall" } else { "Setup" };
         let _ = log::open(std::env::temp_dir().join(format!("{}-{role}-{}.log", m.product.id, log::stamp())));
     }
     log!(
@@ -142,8 +142,12 @@ pub fn run() -> i32 {
         return 0;
     }
     let code = match package.manifest.role {
+        Role::Installer if args.uninstall => uninstall_existing(&args, &env, &m.product),
         Role::Installer => install_flow(&args, &env, package),
-        Role::Uninstaller => uninstall_flow(&args, &env, &exe, package),
+        Role::Uninstaller => match exe.parent() {
+            Some(dir) => uninstall_flow(&args, &env, dir, &m.product, &m.version),
+            None => 1,
+        },
     };
     log!("exit code {code}");
     code
@@ -157,8 +161,8 @@ fn approve_closing(args: &Args, dir: &Path, name: &str) -> bool {
     dialogs::confirm(&format!(
         "{name}{}",
         tr(
-            " 正在运行。继续将先请它正常退出，必要时再结束它。\n\n点击“确定”继续，点击“取消”退出。",
-            " is running. Continuing asks it to exit first and ends it if needed.\n\nChoose OK to continue or Cancel to stop."
+            " 正在运行。继续会请求程序保存并退出。\n\n点击“确定”继续，点击“取消”退出。",
+            " is running. Continuing asks the program to save and exit.\n\nChoose OK to continue or Cancel to stop."
         )
     ))
 }
@@ -239,15 +243,14 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
     if (args.very_silent || auto) && !approve_closing(args, &plan.dir, &name) {
         return 2;
     }
-    let report: &dyn Report = if args.update { &Unattended } else { &Quiet };
     if args.very_silent {
-        return match install::install(env, &mut package, &plan, report) {
+        return match install::install(env, &mut package, &plan, &Quiet) {
             Ok(_) => 0,
             Err(failure) => fail(failure),
         };
     }
 
-    let uninstaller = existing.as_ref().map(|e| e.dir.join(manifest::UNINSTALLER)).filter(|p| p.is_file());
+    let uninstaller = existing.as_ref().map(|e| e.dir.clone());
     let env_vars = env.child_environment(&product);
     let (check_env, manifest, exe_product) = (env.clone(), package.manifest.clone(), product.clone());
     let view = ui::View {
@@ -262,7 +265,6 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
         newer,
         tasks,
         launch: plan.launch,
-        delete_data: false,
         auto,
         updating: args.update,
         suppress: args.suppress_msgboxes,
@@ -289,7 +291,6 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
         let Some(mut package) = work_package.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return Err((3, String::new()));
         };
-        let report: &dyn Report = if plan.close_timeout == UPDATE_CLOSE_TIMEOUT { &Unattended } else { report };
         install::install(&work_env, &mut package, &plan, report)
             .map(|done| ui::Done::Installed { previous: done.previous, warnings: done.warnings })
             .map_err(|failure| {
@@ -299,8 +300,8 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
     });
     match ui::run(view, work) {
         Ok(outcome) => {
-            if let Some(uninstaller) = outcome.open_uninstaller {
-                open_uninstaller(&uninstaller);
+            if let Some(dir) = outcome.open_uninstaller {
+                return open_uninstaller(&dir);
             }
             outcome.code
         }
@@ -317,7 +318,7 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
             {
                 return 2;
             }
-            match install::install(env, &mut package, &plan, report) {
+            match install::install(env, &mut package, &plan, &Quiet) {
                 Ok(_) => {
                     if !auto {
                         dialogs::info(&format!("{name} {}", tr("已安装。", "is installed.")));
@@ -330,26 +331,49 @@ fn install_flow(args: &Args, env: &Env, mut package: Package) -> i32 {
     }
 }
 
-/// Opens the installed version's uninstaller from the temporary folder, so its working
-/// folder never keeps the installation in use.
-fn open_uninstaller(uninstaller: &PathBuf) {
-    if let Err(e) = std::process::Command::new(uninstaller).current_dir(std::env::temp_dir()).spawn() {
-        log!("could not open the uninstaller: {e}");
-        dialogs::error(&e.to_string());
+/// Uses this installer for removal, so an older installed uninstaller cannot purge data.
+fn open_uninstaller(dir: &Path) -> i32 {
+    let start = || {
+        let mut arg = OsString::from("/DIR=");
+        arg.push(dir);
+        std::process::Command::new(std::env::current_exe()?)
+            .arg("/UNINSTALL")
+            .arg(arg)
+            .current_dir(std::env::temp_dir())
+            .spawn()
+    };
+    match start() {
+        Ok(_) => 0,
+        Err(e) => {
+            log!("could not open the uninstaller: {e}");
+            dialogs::error(&e.to_string());
+            3
+        }
     }
 }
 
-fn uninstall_flow(args: &Args, env: &Env, exe: &Path, package: Package) -> i32 {
-    let product = package.manifest.product.clone();
+fn uninstall_existing(args: &Args, env: &Env, product: &Product) -> i32 {
+    let failure = match install::find_existing(env, &env.registry(), product, args.dir.as_deref()) {
+        Ok(Some(existing)) => return uninstall_flow(args, env, &existing.dir, product, &existing.record.version),
+        Ok(None) => Failure::Invalid(tr("未找到已有安装。", "No existing installation was found.").into()),
+        Err(failure) => failure,
+    };
+    log!("failed with exit code {}: {failure:?}", failure.code());
+    if args.may_show_messages() {
+        show_failure(&failure, text::name(&product.name), true);
+    }
+    failure.code()
+}
+
+fn uninstall_flow(args: &Args, env: &Env, dir: &Path, product: &Product, version: &str) -> i32 {
     let name = text::name(&product.name).to_string();
-    let label = text::data_label(&product);
-    let Some(dir) = exe.parent().map(Path::to_path_buf) else { return 1 };
+    let label = text::data_label(product);
     let show = args.may_show_messages();
     let leftovers = |left: &uninstall::Leftovers| -> Vec<String> {
         left.paths.iter().map(|p| format!("{} {}", tr("未能删除", "Could not remove"), p.display())).collect()
     };
     if args.very_silent {
-        return match uninstall::uninstall(env, &product, &dir, args.delete_data, &Quiet) {
+        return match uninstall::uninstall(env, product, dir, &Quiet) {
             Ok(_) => 0,
             Err(failure) => {
                 log!("failed with exit code {}: {failure:?}", failure.code());
@@ -360,22 +384,21 @@ fn uninstall_flow(args: &Args, env: &Env, exe: &Path, package: Package) -> i32 {
             }
         };
     }
-    if args.silent && !approve_closing(args, &dir, &name) {
+    if args.silent && !approve_closing(args, dir, &name) {
         return 2;
     }
     let view = ui::View {
         role: ui::Role::Uninstall,
         name: name.clone(),
-        version: package.manifest.version.clone(),
+        version: version.into(),
         product_id: product.id.clone(),
         data_label: label.clone(),
-        dir: dir.clone(),
+        dir: dir.to_path_buf(),
         dir_locked: true,
         installed: None,
         newer: None,
         tasks: product.tasks,
         launch: false,
-        delete_data: args.delete_data,
         auto: args.silent,
         updating: false,
         suppress: args.suppress_msgboxes,
@@ -388,7 +411,7 @@ fn uninstall_flow(args: &Args, env: &Env, exe: &Path, package: Package) -> i32 {
     let (work_env, work_product, work_name) = (env.clone(), product.clone(), name.clone());
     let work: ui::Work = Box::new(move |choice: ui::Choice, report: &dyn Report| {
         let _com = shortcut::Com::start();
-        uninstall::uninstall(&work_env, &work_product, &choice.dir, choice.delete_data, report)
+        uninstall::uninstall(&work_env, &work_product, &choice.dir, report)
             .map(|left| ui::Done::Uninstalled { warnings: leftovers(&left) })
             .map_err(|failure| {
                 log!("failed with exit code {}: {failure:?}", failure.code());
@@ -399,15 +422,10 @@ fn uninstall_flow(args: &Args, env: &Env, exe: &Path, package: Package) -> i32 {
         Ok(outcome) => outcome.code,
         Err(problem) => {
             log!("the uninstall window could not be shown: {problem}");
-            let delete_data = if args.silent {
-                args.delete_data
-            } else {
-                match dialogs::confirm_uninstall(&name, &label) {
-                    None => return 2,
-                    Some(delete) => delete || args.delete_data,
-                }
-            };
-            match uninstall::uninstall(env, &product, &dir, delete_data, &Quiet) {
+            if !args.silent && !dialogs::confirm_uninstall(&name, &label) {
+                return 2;
+            }
+            match uninstall::uninstall(env, product, dir, &Quiet) {
                 Ok(_) => {
                     if !args.silent {
                         dialogs::info(&format!("{name}{}", tr(" 已卸载。", " was uninstalled.")));

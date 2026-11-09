@@ -26,7 +26,7 @@ pub enum Base {
     LocalAppData,
 }
 
-/// A folder of user data removed only when the user asks for it while uninstalling.
+/// A protected folder for application data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DataDir {
@@ -70,9 +70,6 @@ pub struct Product {
     pub quit_args: Vec<String>,
     #[serde(default)]
     pub data_dirs: Vec<DataDir>,
-    /// Windows Credential Manager entries starting with this are user data too.
-    #[serde(default)]
-    pub credential_prefix: String,
     /// What the user data is called in setup texts, e.g. "settings, note cards and saved keys".
     #[serde(default)]
     pub data_label: Option<Names>,
@@ -243,7 +240,6 @@ pub(crate) mod tests {
             background_args: "--background".into(),
             quit_args: vec![],
             data_dirs: vec![],
-            credential_prefix: String::new(),
             data_label: None,
             test_environment: BTreeMap::new(),
             tasks: Tasks::default(),

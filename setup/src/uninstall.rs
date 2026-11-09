@@ -1,4 +1,4 @@
-//! Uninstalling (REL-05). Settings and user data stay unless the user asks to delete them.
+//! Uninstalling (REL-05). Settings and user data always stay.
 //! Only files from the install record, the shortcuts this installer created, and a Run
 //! value that starts exactly this installation are removed. A running uninstaller cannot
 //! delete itself, so a copy in the temporary folder waits until it has exited and then
@@ -12,12 +12,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, WAIT_FAILED};
-use windows::Win32::Security::Credentials::{CREDENTIALW, CredDeleteW, CredEnumerateW, CredFree};
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, DETACHED_PROCESS, INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
-use windows::core::HSTRING;
 
 use crate::install::{self, CLOSE_TIMEOUT, Failure, Report, Stage};
 use crate::log;
@@ -35,37 +33,6 @@ pub const CLEANUP_SWITCH: &str = "--cleanup";
 #[derive(Debug, Default, PartialEq)]
 pub struct Leftovers {
     pub paths: Vec<PathBuf>,
-}
-
-/// Deletes Credential Manager entries whose target starts with `prefix`; returns how many.
-fn delete_credentials(prefix: &str) -> usize {
-    if prefix.is_empty() {
-        return 0;
-    }
-    let filter = HSTRING::from(format!("{prefix}*"));
-    let (mut count, mut list) = (0u32, std::ptr::null_mut::<*mut CREDENTIALW>());
-    // SAFETY: CredEnumerateW allocates `list` with `count` entries; it is freed with CredFree.
-    if unsafe { CredEnumerateW(&filter, None, &mut count, &mut list) }.is_err() {
-        return 0;
-    }
-    let mut targets = Vec::new();
-    // SAFETY: `list` holds `count` valid credential pointers until CredFree.
-    unsafe {
-        for i in 0..count as usize {
-            let credential = &**list.add(i);
-            if let Ok(name) = credential.TargetName.to_string() {
-                if name.starts_with(prefix) {
-                    targets.push((name, credential.Type));
-                }
-            }
-        }
-        CredFree(list as *const _);
-    }
-    targets
-        .iter()
-        // SAFETY: deletes one credential of the current user by its exact target and type.
-        .filter(|(name, kind)| unsafe { CredDeleteW(&HSTRING::from(name.as_str()), *kind, None) }.is_ok())
-        .count()
 }
 
 fn system_dir() -> PathBuf {
@@ -132,15 +99,11 @@ pub fn cleanup(dir: &Path, pid: u32) {
         .spawn();
 }
 
-/// Removes the installation in `dir`. `delete_data` also removes the product's data
-/// folders and credentials (the credential store is skipped in isolated test mode).
-pub fn uninstall(
-    env: &Env,
-    product: &Product,
-    dir: &Path,
-    delete_data: bool,
-    report: &dyn Report,
-) -> Result<Leftovers, Failure> {
+/// Removes the installation in `dir`, preserving all user data.
+pub fn uninstall(env: &Env, product: &Product, dir: &Path, report: &dyn Report) -> Result<Leftovers, Failure> {
+    if crate::paths::in_data_dir(dir, env, product) {
+        return Err(Failure::Invalid(tr("不能卸载数据目录。", "Cannot uninstall a data folder.").into()));
+    }
     let Some(record) = install::read_record(dir, &product.id) else {
         return Err(Failure::Invalid(
             tr(
@@ -154,7 +117,7 @@ pub fn uninstall(
     report.progress(Stage::Closing, 0, 1);
     let env_vars = env.child_environment(product);
     let quit = Quit { exe: install::main_exe(dir, product), args: &product.quit_args, env: &env_vars };
-    if let Err(names) = process::close_all(dir, Some(quit), CLOSE_TIMEOUT, &|names| report.force_close(names)) {
+    if let Err(names) = process::close_all(dir, Some(quit), CLOSE_TIMEOUT) {
         return Err(Failure::InUse(names));
     }
     report.progress(Stage::Replacing, 0, 1);
@@ -180,23 +143,11 @@ pub fn uninstall(
         report.progress(Stage::Replacing, index as u64 + 1, total);
     }
     install::remove_empty_folders(dir, &record.files);
-    install::clear_stale_staging(dir);
     report.progress(Stage::Finishing, 0, 1);
     let _ = fs::remove_file(dir.join(RECORD_FILE));
     let registered = registry.entry(&product.id).ok().flatten().and_then(|e| registry::text(&e, "InstallLocation"));
     if registered.is_some_and(|location| process::same_path(Path::new(&location), dir)) {
         let _ = registry.delete_entry(&product.id);
-    }
-    if delete_data {
-        for data in &product.data_dirs {
-            let path = env.data_dir(data);
-            if path.exists() && fs::remove_dir_all(&path).is_err() {
-                left.paths.push(path);
-            }
-        }
-        if env.test_root.is_none() {
-            log!("deleted {} saved credentials", delete_credentials(&product.credential_prefix));
-        }
     }
     let uninstaller = dir.join(UNINSTALLER);
     let running_from_dir = std::env::current_exe().is_ok_and(|exe| process::same_path(&exe, &uninstaller));
@@ -221,7 +172,7 @@ mod tests {
     use crate::manifest::{Base, DataDir};
 
     #[test]
-    fn removes_the_installation_and_keeps_data_unless_asked() {
+    fn removes_the_installation_and_keeps_data() {
         let _com = shortcut::Com::start();
         let t = Test::new("uninstall", &[("Demo.exe", b"v1".to_vec()), ("lib/a.dll", b"a".to_vec())]);
         let mut product = crate::manifest::tests::product();
@@ -232,13 +183,16 @@ mod tests {
         let data = t.env.roaming_app_data.join("Demo");
         fs::create_dir_all(&data).unwrap();
         fs::write(data.join("settings.json"), b"{}").unwrap();
+        fs::write(data.join("cards.json"), b"{\"cards\":[]}").unwrap();
+        fs::create_dir_all(data.join("随手记")).unwrap();
+        fs::write(data.join("随手记").join("daily.md"), b"note document").unwrap();
         // Another installation's Run value and shortcut must survive.
         let registry = t.env.registry();
         let foreign_link = t.env.desktop.join("Other.lnk");
         shortcut::create(&foreign_link, &t.root.join("Other.exe"), "other").unwrap();
 
         let dir = plan.dir.clone();
-        assert_eq!(uninstall(&t.env, &product, &dir, false, &Quiet), Ok(Leftovers::default()));
+        assert_eq!(uninstall(&t.env, &product, &dir, &Quiet), Ok(Leftovers::default()));
         assert!(!dir.exists(), "program folder removed");
         assert!(data.join("settings.json").is_file(), "settings kept by default");
         assert_eq!(registry.entry("Demo").unwrap(), None);
@@ -248,9 +202,14 @@ mod tests {
 
         install(&t.env, &mut t.package(), &t.plan(None), &Quiet).unwrap();
         fs::write(dir.join("mine.txt"), b"x").unwrap();
+        fs::create_dir(dir.join(".setup-personal")).unwrap();
+        fs::write(dir.join(".setup-personal/daily.md"), b"custom document").unwrap();
         registry.set_run("Demo", Some("\"C:\\Elsewhere\\Demo.exe\" --background")).unwrap();
-        uninstall(&t.env, &product, &dir, true, &Quiet).unwrap();
-        assert!(!data.exists(), "data deleted on request");
+        uninstall(&t.env, &product, &dir, &Quiet).unwrap();
+        assert_eq!(fs::read(data.join("settings.json")).unwrap(), b"{}");
+        assert_eq!(fs::read(data.join("cards.json")).unwrap(), b"{\"cards\":[]}");
+        assert_eq!(fs::read(data.join("随手记").join("daily.md")).unwrap(), b"note document");
+        assert_eq!(fs::read(dir.join(".setup-personal/daily.md")).unwrap(), b"custom document");
         assert!(registry.run("Demo").unwrap().is_some(), "a Run value of another installation stays");
         assert!(dir.join("mine.txt").is_file() && !dir.join("Demo.exe").exists(), "files the user added stay");
     }
@@ -262,7 +221,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("keep.txt"), b"x").unwrap();
         let product = crate::manifest::tests::product();
-        assert!(matches!(uninstall(&t.env, &product, &dir, true, &Quiet), Err(Failure::Invalid(_))));
+        assert!(matches!(uninstall(&t.env, &product, &dir, &Quiet), Err(Failure::Invalid(_))));
         assert!(dir.join("keep.txt").exists());
     }
 

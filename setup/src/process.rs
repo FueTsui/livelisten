@@ -10,8 +10,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
 use windows::core::{BOOL, PWSTR};
@@ -106,15 +105,9 @@ pub struct Quit<'a> {
     pub env: &'a [(String, String)],
 }
 
-/// Closes everything running from `dir`: first the main program's own quit request (or
-/// WM_CLOSE to the windows of programs without one), then, after `timeout`, termination if
-/// `force` agrees. Returns whether the main program was running, or the names still running.
-pub fn close_all(
-    dir: &Path,
-    quit: Option<Quit<'_>>,
-    timeout: Duration,
-    force: &dyn Fn(&[String]) -> bool,
-) -> Result<bool, Vec<String>> {
+/// Requests a normal exit from programs in `dir` so they have a chance to save their data.
+/// Returns whether the main program was running, or the names still running after `timeout`.
+pub fn close_all(dir: &Path, quit: Option<Quit<'_>>, timeout: Duration) -> Result<bool, Vec<String>> {
     let list = running_in(dir);
     if list.is_empty() {
         return Ok(false);
@@ -148,26 +141,6 @@ pub fn close_all(
         std::thread::sleep(Duration::from_millis(200));
         left = running_in(dir);
     }
-    if left.is_empty() {
-        return Ok(main_running);
-    }
-    let still = names(&left);
-    if !force(&still) {
-        return Err(still);
-    }
-    for running in &left {
-        // SAFETY: terminate and wait rights on one process from the install folder; closed by `Handle`.
-        if let Ok(handle) = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, running.pid) } {
-            let handle = Handle(handle);
-            // SAFETY: as above.
-            unsafe {
-                let _ = TerminateProcess(handle.0, 1);
-                WaitForSingleObject(handle.0, 5000);
-            }
-            log!("terminated {}", running.path.display());
-        }
-    }
-    let left = running_in(dir);
     if left.is_empty() { Ok(main_running) } else { Err(names(&left)) }
 }
 
@@ -217,9 +190,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(running_in(&dir).len(), 1);
-        let refused = close_all(&dir, None, Duration::from_millis(300), &|_| false);
-        assert_eq!(refused, Err(vec!["waiter.exe".to_string()]), "refusing to force leaves it running");
-        assert_eq!(close_all(&dir, None, Duration::from_millis(300), &|_| true), Ok(false));
+        let refused = close_all(&dir, None, Duration::from_millis(300));
+        assert_eq!(refused, Err(vec!["waiter.exe".to_string()]));
+        assert!(child.try_wait().unwrap().is_none(), "setup leaves the program running after a timeout");
+        child.kill().unwrap();
         let _ = child.wait();
         assert!(running_in(&dir).is_empty());
         let _ = std::fs::remove_dir_all(dir);

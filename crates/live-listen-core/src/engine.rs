@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::audio::{self, AudioError, AudioFrame, Capture, Source};
 use crate::captions::{Captions, Line, LineSource};
+use crate::cards::CardKind;
 use crate::config::{self, EndAction, Preconnect, Settings, SourceKind};
 use crate::dictation::{self, WriteOp, Writer};
 use crate::hotkey::{Binding, Mode, Signal};
@@ -1463,9 +1464,13 @@ impl Core {
         d.stopped_at = Some(now);
         d.deadline = Some(now + FINISH_WAIT);
         let id = d.next.unwrap_or(d.session);
+        let held_note = d.trigger == Trigger::Hold && d.purpose == Purpose::Note;
         self.send(Channel::Dictation, &ToProvider::Stop { id });
-        if let Some(hook) = &self.hook {
-            hook.hold_input();
+        // A held note has no target to protect while recognition finishes.
+        if !held_note {
+            if let Some(hook) = &self.hook {
+                hook.hold_input();
+            }
         }
         self.emit_state();
     }
@@ -2047,7 +2052,7 @@ impl Core {
             Signal::HoldArmed => self.rewarm(Instant::now()),
             Signal::HoldStart => self.start_dictation(Trigger::Hold, Purpose::Type),
             Signal::HoldEnd | Signal::HoldInterrupted => {
-                if self.dictation.as_ref().is_some_and(|d| d.trigger == Trigger::Hold) {
+                if self.dictation.as_ref().is_some_and(|d| d.trigger == Trigger::Hold && d.purpose == Purpose::Type) {
                     self.stop_dictation(false);
                 }
             }
@@ -2063,7 +2068,22 @@ impl Core {
                 let on = !self.captions.on;
                 self.set_captions(on);
             }
-            Signal::Note => self.toggle_note(),
+            Signal::NoteHoldStart => {
+                if self.dictation.as_ref().is_some_and(|d| d.purpose == Purpose::Type) {
+                    self.notice("busy");
+                } else {
+                    self.start_dictation(Trigger::Hold, Purpose::Note);
+                }
+            }
+            Signal::NoteHoldEnd => {
+                if self.dictation.as_ref().is_some_and(|d| d.trigger == Trigger::Hold && d.purpose == Purpose::Note) {
+                    self.stop_dictation(false);
+                }
+            }
+            Signal::NoteToggle => self.toggle_note(),
+            Signal::NoteBlank => {
+                let _ = self.add_card(CardKind::Note, "", true);
+            }
             Signal::Cards => {
                 let on = !self.cards_shown();
                 self.set_cards_shown(on);
@@ -2831,7 +2851,7 @@ for line in sys.stdin:
         assert_eq!(dup["display"], "Ctrl+Alt+C");
         let lone = call(&engine, json!({"cmd": "hotkey.check", "binding": "RAlt", "field": "toggle"}));
         assert_eq!(lone["conflict"], "modifier_only");
-        let hold = call(&engine, json!({"cmd": "hotkey.check", "binding": "RAlt", "field": "hold"}));
+        let hold = call(&engine, json!({"cmd": "hotkey.check", "binding": "Ctrl+Left", "field": "hold"}));
         assert_eq!(hold["valid"], true);
         assert_eq!(hold["conflict"], "duplicate");
         let note = call(&engine, json!({"cmd": "hotkey.check", "binding": "rightalt", "field": "note"}));

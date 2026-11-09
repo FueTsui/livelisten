@@ -134,7 +134,7 @@ internal sealed partial class SettingsWindow
     {
         var version = pageVersion;
         var rows = new List<ShortcutRow>();
-        foreach (var field in new[] { "hold", "toggle", "captions", "note", "cards" })
+        foreach (var field in new[] { "hold", "toggle", "captions", "note", "noteToggle", "noteBlank", "cards" })
         {
             var input = new HotkeyInput(T($"key.{field}.title"), s.Str("hotkeys." + field));
             var retry = new Button { Content = T("key.retry"), Visibility = Visibility.Collapsed, Padding = new Thickness(8, 2, 8, 2), MinHeight = 24 };

@@ -6,7 +6,7 @@ namespace LiveListen.Services;
 /// <summary>Card header formatting only; never changes a note or its creation timestamp.</summary>
 internal static class CardHeaderInfo
 {
-    public const string DefaultMode = "yearMonthDay";
+    public const string DefaultMode = "title";
     public const int MaxTitleLength = 80;
     public static readonly string[] Modes =
         ["none", "yearMonthDay", "monthDay", "monthDayTime", "monthDayWeekday", "monthDayTitle", "weekdayTitle", "title"];

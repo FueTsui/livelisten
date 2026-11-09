@@ -4,7 +4,7 @@
 
 ## 构建
 
-需要Rust/MSVC、.NET 10 SDK、Python 3.11+、PowerShell。版本均为 0.1.1；下载输入固定在 `scripts/release-dependencies.json`，按Python.org/PyPI元数据校验SHA256，不复制本机site-packages。
+需要Rust/MSVC、.NET 10 SDK、Python 3.11+、PowerShell。版本均为 0.1.2；下载输入固定在 `scripts/release-dependencies.json`，按Python.org/PyPI元数据校验SHA256，不复制本机site-packages。
 
 ```powershell
 .\scripts\package-portable.ps1

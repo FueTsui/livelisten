@@ -12,9 +12,9 @@ use crate::hotkey::Binding;
 
 /// Current settings schema version. Version 2 removed translation, conversation records,
 /// summaries and voiceprints (see [`Settings::removed_secrets`]); version 3 replaced the
-/// preconnect switch with [`Preconnect`] levels; version 4 changes the uncustomized
-/// spoken-note shortcut to a lone right Alt tap.
-pub const SETTINGS_VERSION: u32 = 4;
+/// preconnect switch with [`Preconnect`] levels; versions 4 and 5 update the default
+/// spoken-note shortcut to right Alt and Ctrl+Left, respectively.
+pub const SETTINGS_VERSION: u32 = 5;
 
 /// Built-in speech provider identifier.
 pub const DOUBAO_ID: &str = "doubao";
@@ -151,8 +151,12 @@ pub struct HotkeySettings {
     pub toggle: String,
     /// Show or hide live captions.
     pub captions: String,
-    /// Start a spoken note; any key or click ends it.
+    /// Hold to record a spoken note, release to finish.
     pub note: String,
+    /// Start or stop a spoken note like the tray entry.
+    pub note_toggle: String,
+    /// Create a blank desktop note without using the microphone.
+    pub note_blank: String,
     /// Show or hide the cards on the desktop.
     pub cards: String,
 }
@@ -163,7 +167,9 @@ impl Default for HotkeySettings {
             hold: "RCtrl".into(),
             toggle: "Ctrl+Alt+Space".into(),
             captions: "Ctrl+Alt+C".into(),
-            note: "RAlt".into(),
+            note: "Ctrl+Left".into(),
+            note_toggle: "Ctrl+Alt+N".into(),
+            note_blank: "Ctrl+Alt+L".into(),
             cards: "Ctrl+Alt+K".into(),
         }
     }
@@ -171,13 +177,15 @@ impl Default for HotkeySettings {
 
 impl HotkeySettings {
     /// Every shortcut field with its settings name.
-    pub fn fields(&self) -> [(&'static str, &str); 5] {
+    pub fn fields(&self) -> [(&'static str, &str); 7] {
         [
             ("hold", &self.hold),
             ("toggle", &self.toggle),
             ("captions", &self.captions),
             ("note", &self.note),
             ("cards", &self.cards),
+            ("noteToggle", &self.note_toggle),
+            ("noteBlank", &self.note_blank),
         ]
     }
 }
@@ -268,7 +276,7 @@ impl Default for SurfaceStyle {
             corner_radius: 8.0,
             shadow: Shadow::Soft,
             padding: 12.0,
-            card_header: "yearMonthDay".into(),
+            card_header: "title".into(),
             card_header_date: String::new(),
             card_header_title: String::new(),
         }
@@ -298,7 +306,7 @@ impl SurfaceStyle {
                 | "title"
         ) {
             issues.push(Issue { field: format!("{name}.cardHeader"), code: "invalid".into() });
-            self.card_header = "yearMonthDay".into();
+            self.card_header = SurfaceStyle::default().card_header;
         }
         if !self.card_header_date.is_empty() && !valid_header_date(&self.card_header_date) {
             issues.push(Issue { field: format!("{name}.cardHeaderDate"), code: "invalid".into() });
@@ -453,21 +461,21 @@ impl Settings {
     /// Clamps numbers, fills empty required values and reports invalid entries.
     pub fn sanitize(&mut self) -> Vec<Issue> {
         let mut issues = Vec::new();
-        // Preserve custom/disabled bindings and an existing RAlt assignment. Schema 4
-        // distinguishes migration from a later deliberate choice of the former default.
-        let right_alt = Binding::parse("RAlt").ok();
-        if self.version < 4
-            && Binding::parse(&self.hotkeys.note).ok() == Binding::parse("Ctrl+Alt+N").ok()
+        let defaults = HotkeySettings::default();
+        let old_note = Binding::parse(&self.hotkeys.note).ok();
+        let default_note = Binding::parse(&defaults.note).ok();
+        let legacy_note = (self.version < 5 && old_note == Binding::parse("RAlt").ok())
+            || (self.version < 4 && old_note == Binding::parse("Ctrl+Alt+N").ok());
+        if legacy_note
             && !self
                 .hotkeys
                 .fields()
                 .iter()
-                .any(|(field, value)| *field != "note" && Binding::parse(value).ok() == right_alt)
+                .any(|(field, value)| *field != "note" && Binding::parse(value).ok() == default_note)
         {
-            self.hotkeys.note = "RAlt".into();
+            self.hotkeys.note.clone_from(&defaults.note);
         }
         self.version = SETTINGS_VERSION;
-        let defaults = HotkeySettings::default();
         let mut seen: Vec<Binding> = Vec::new();
         for (field, value, fallback) in [
             ("hotkeys.hold", &mut self.hotkeys.hold, defaults.hold),
@@ -475,25 +483,29 @@ impl Settings {
             ("hotkeys.captions", &mut self.hotkeys.captions, defaults.captions),
             ("hotkeys.note", &mut self.hotkeys.note, defaults.note),
             ("hotkeys.cards", &mut self.hotkeys.cards, defaults.cards),
+            // Defaults for new actions must never displace an existing binding.
+            ("hotkeys.noteToggle", &mut self.hotkeys.note_toggle, defaults.note_toggle),
+            ("hotkeys.noteBlank", &mut self.hotkeys.note_blank, defaults.note_blank),
         ] {
             if value.trim().is_empty() {
                 value.clear(); // An empty binding disables the shortcut.
                 continue;
             }
-            match Binding::parse(value) {
-                Ok(binding) => {
-                    if seen.contains(&binding) {
-                        issues.push(Issue { field: field.into(), code: "duplicate".into() });
-                        value.clear();
-                    } else {
-                        *value = binding.to_string();
-                        seen.push(binding);
-                    }
-                }
-                Err(_) => {
+            let binding = Binding::parse(value)
+                .ok()
+                .filter(|b| {
+                    seen.contains(b) || !b.is_modifier_only() || matches!(field, "hotkeys.hold" | "hotkeys.note")
+                })
+                .unwrap_or_else(|| {
                     issues.push(Issue { field: field.into(), code: "invalid".into() });
-                    *value = fallback;
-                }
+                    Binding::parse(&fallback).expect("valid default hotkey")
+                });
+            if seen.contains(&binding) {
+                issues.push(Issue { field: field.into(), code: "duplicate".into() });
+                value.clear();
+            } else {
+                *value = binding.to_string();
+                seen.push(binding);
             }
         }
         // "On" in version 2 was the ten-minute window that `Aggressive` keeps.
@@ -632,19 +644,30 @@ mod tests {
 
     #[test]
     fn note_hotkey_migration_preserves_custom_disabled_and_conflicting_bindings() {
-        assert_eq!(HotkeySettings::default().note, "RAlt");
+        assert_eq!(HotkeySettings::default().note, "Ctrl+Left");
         for (raw, expected) in [
-            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "RAlt"),
-            (r#"{"version":3,"hotkeys":{"note":"ctrl + alt + n"}}"#, "RAlt"),
-            (r#"{"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "RAlt"),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Left"),
+            (r#"{"version":3,"hotkeys":{"note":"ctrl + alt + n"}}"#, "Ctrl+Left"),
+            (r#"{"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Left"),
             (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+M"}}"#, "Ctrl+Alt+M"),
             (r#"{"version":3,"hotkeys":{"note":""}}"#, ""),
-            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N","hold":"RAlt"}}"#, "Ctrl+Alt+N"),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N","hold":"RAlt"}}"#, "Ctrl+Left"),
+            (r#"{"version":4,"hotkeys":{"note":"rightAlt"}}"#, "Ctrl+Left"),
+            (r#"{"version":4,"hotkeys":{"note":"RAlt","hold":"Ctrl+Left"}}"#, "RAlt"),
+            (r#"{"version":5,"hotkeys":{"note":"RAlt"}}"#, "RAlt"),
             (r#"{"version":4,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Alt+N"),
         ] {
             let mut settings: Settings = serde_json::from_str(raw).unwrap();
-            assert!(settings.sanitize().is_empty(), "{raw}");
-            assert_eq!(settings.version, 4);
+            let issues = settings.sanitize();
+            assert_eq!(settings.version, SETTINGS_VERSION);
+            if expected == "Ctrl+Alt+N" {
+                assert!(settings.hotkeys.note_toggle.is_empty());
+                assert_eq!(issues, [Issue { field: "hotkeys.noteToggle".into(), code: "duplicate".into() }]);
+            } else {
+                assert_eq!(settings.hotkeys.note_toggle, "Ctrl+Alt+N");
+                assert!(issues.is_empty(), "{raw}");
+            }
+            assert_eq!(settings.hotkeys.note_blank, "Ctrl+Alt+L");
             assert_eq!(settings.hotkeys.note, expected, "{raw}");
             let mut restored: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
             assert!(restored.sanitize().is_empty());
@@ -663,7 +686,7 @@ mod tests {
         settings.save(&path).unwrap();
         let mut reloaded = Settings::load(&path);
         assert_eq!(reloaded.hotkeys.cards, "Backspace");
-        assert_eq!(reloaded.hotkeys.note, "RAlt");
+        assert_eq!(reloaded.hotkeys.note, "Ctrl+Left");
         assert!(reloaded.hotkeys.captions.is_empty());
         assert!(reloaded.sanitize().is_empty());
         reloaded.save(&path).unwrap();
@@ -674,7 +697,7 @@ mod tests {
     #[test]
     fn card_header_defaults_and_all_modes_round_trip() {
         let legacy: SurfaceStyle = serde_json::from_str(r#"{"padding":8}"#).unwrap();
-        assert_eq!(legacy.card_header, "yearMonthDay");
+        assert_eq!(legacy.card_header, "title");
         assert!(legacy.card_header_date.is_empty());
         assert!(legacy.card_header_title.is_empty());
         for mode in [
@@ -725,7 +748,7 @@ mod tests {
             ..SurfaceStyle::default()
         };
         assert!(style.sanitize("cards").iter().any(|i| i.field == "cards.cardHeader"));
-        assert_eq!(style.card_header, "yearMonthDay");
+        assert_eq!(style.card_header, "title");
         assert_eq!(style.card_header_title.chars().count(), 80);
         assert!(style.card_header_title.starts_with("A B "));
         assert!(style.card_header_title.chars().all(|c| !c.is_control()));

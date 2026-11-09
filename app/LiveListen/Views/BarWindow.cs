@@ -69,6 +69,7 @@ internal sealed partial class BarWindow : Window
     private readonly Surface captionSurface;
     private ScaleTransform zoomTransform => (ScaleTransform)voiceBox.RenderTransform;
     private string phase = "idle";
+    private string? noteStatus;
     private string heldReason = "";
     private string text = "";
     private string unwritten = "";
@@ -473,6 +474,9 @@ internal sealed partial class BarWindow : Window
             AutoShow();
         }
         phase = next;
+        noteStatus = d is not null && d["purpose"].Str() == "note"
+            ? (d["trigger"].Str() == "hold" ? "status.note.hold" : "status.note")
+            : null;
         if (d is not null && next != "idle")
         {
             heldReason = d["paused"].Bool() ? "paused" : d["blocked"].Str();
@@ -605,7 +609,7 @@ internal sealed partial class BarWindow : Window
         {
             "connecting" => Loc.T("status.connecting"),
             "finishing" => Loc.T("status.finishing"),
-            "listening" when !showLive => Loc.T("voice.listening"),
+            "listening" when !showLive => Loc.T(noteStatus ?? "voice.listening"),
             _ => unwritten.Length > 0 ? Loc.T("bar.unwritten") : "",
         });
         var inlineFinishing = phase == "finishing" && showLive && message is null;
