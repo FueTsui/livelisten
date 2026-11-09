@@ -12,9 +12,9 @@ use crate::hotkey::Binding;
 
 /// Current settings schema version. Version 2 removed translation, conversation records,
 /// summaries and voiceprints (see [`Settings::removed_secrets`]); version 3 replaced the
-/// preconnect switch with [`Preconnect`] levels; versions 4 and 5 update the default
-/// spoken-note shortcut to right Alt and Ctrl+Left, respectively.
-pub const SETTINGS_VERSION: u32 = 5;
+/// preconnect switch with [`Preconnect`] levels. Versions 4 through 6 update the
+/// default spoken-note shortcut to right Alt, Ctrl+Left, and Ctrl+Right, respectively.
+pub const SETTINGS_VERSION: u32 = 6;
 
 /// Built-in speech provider identifier.
 pub const DOUBAO_ID: &str = "doubao";
@@ -167,7 +167,7 @@ impl Default for HotkeySettings {
             hold: "RCtrl".into(),
             toggle: "Ctrl+Alt+Space".into(),
             captions: "Ctrl+Alt+C".into(),
-            note: "Ctrl+Left".into(),
+            note: "Ctrl+Right".into(),
             note_toggle: "Ctrl+Alt+N".into(),
             note_blank: "Ctrl+Alt+L".into(),
             cards: "Ctrl+Alt+K".into(),
@@ -439,15 +439,30 @@ pub struct Position {
     pub y: i32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GeneralSettings {
     pub start_with_windows: bool,
+    /// Check release metadata once a day without downloading or installing updates.
+    pub check_updates_daily: bool,
     pub bar_position: Option<Position>,
     /// Screen-space visual center for fixed-canvas scaling; old top-left remains compatible.
     pub bar_visual_center: Option<Position>,
     pub captions_position: Option<Position>,
     pub close_hint_shown: bool,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            start_with_windows: false,
+            check_updates_daily: true,
+            bar_position: None,
+            bar_visual_center: None,
+            captions_position: None,
+            close_hint_shown: false,
+        }
+    }
 }
 
 /// A problem found while validating settings.
@@ -464,7 +479,8 @@ impl Settings {
         let defaults = HotkeySettings::default();
         let old_note = Binding::parse(&self.hotkeys.note).ok();
         let default_note = Binding::parse(&defaults.note).ok();
-        let legacy_note = (self.version < 5 && old_note == Binding::parse("RAlt").ok())
+        let legacy_note = (self.version == 5 && old_note == Binding::parse("Ctrl+Left").ok())
+            || (self.version < 5 && old_note == Binding::parse("RAlt").ok())
             || (self.version < 4 && old_note == Binding::parse("Ctrl+Alt+N").ok());
         if legacy_note
             && !self
@@ -644,17 +660,22 @@ mod tests {
 
     #[test]
     fn note_hotkey_migration_preserves_custom_disabled_and_conflicting_bindings() {
-        assert_eq!(HotkeySettings::default().note, "Ctrl+Left");
+        assert_eq!(HotkeySettings::default().note, "Ctrl+Right");
         for (raw, expected) in [
-            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Left"),
-            (r#"{"version":3,"hotkeys":{"note":"ctrl + alt + n"}}"#, "Ctrl+Left"),
-            (r#"{"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Left"),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Right"),
+            (r#"{"version":3,"hotkeys":{"note":"ctrl + alt + n"}}"#, "Ctrl+Right"),
+            (r#"{"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Right"),
             (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+M"}}"#, "Ctrl+Alt+M"),
             (r#"{"version":3,"hotkeys":{"note":""}}"#, ""),
-            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N","hold":"RAlt"}}"#, "Ctrl+Left"),
-            (r#"{"version":4,"hotkeys":{"note":"rightAlt"}}"#, "Ctrl+Left"),
-            (r#"{"version":4,"hotkeys":{"note":"RAlt","hold":"Ctrl+Left"}}"#, "RAlt"),
+            (r#"{"version":3,"hotkeys":{"note":"Ctrl+Alt+N","hold":"RAlt"}}"#, "Ctrl+Right"),
+            (r#"{"version":4,"hotkeys":{"note":"rightAlt"}}"#, "Ctrl+Right"),
+            (r#"{"version":4,"hotkeys":{"note":"RAlt","hold":"Ctrl+Right"}}"#, "RAlt"),
             (r#"{"version":5,"hotkeys":{"note":"RAlt"}}"#, "RAlt"),
+            (r#"{"version":5,"hotkeys":{"note":"ctrl + left"}}"#, "Ctrl+Right"),
+            (r#"{"version":5,"hotkeys":{"note":"Ctrl+Left","hold":"Ctrl+Right"}}"#, "Ctrl+Left"),
+            (r#"{"version":4,"hotkeys":{"note":"Ctrl+Left"}}"#, "Ctrl+Left"),
+            (r#"{"version":6,"hotkeys":{"note":"Ctrl+Left"}}"#, "Ctrl+Left"),
+            (r#"{"version":5,"hotkeys":{"note":""}}"#, ""),
             (r#"{"version":4,"hotkeys":{"note":"Ctrl+Alt+N"}}"#, "Ctrl+Alt+N"),
         ] {
             let mut settings: Settings = serde_json::from_str(raw).unwrap();
@@ -686,7 +707,7 @@ mod tests {
         settings.save(&path).unwrap();
         let mut reloaded = Settings::load(&path);
         assert_eq!(reloaded.hotkeys.cards, "Backspace");
-        assert_eq!(reloaded.hotkeys.note, "Ctrl+Left");
+        assert_eq!(reloaded.hotkeys.note, "Ctrl+Right");
         assert!(reloaded.hotkeys.captions.is_empty());
         assert!(reloaded.sanitize().is_empty());
         reloaded.save(&path).unwrap();

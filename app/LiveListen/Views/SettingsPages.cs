@@ -666,6 +666,7 @@ internal sealed partial class SettingsWindow
     private void BuildGeneral()
     {
         Card(T("gen.startup.title"), null, Toggle("general.startWithWindows"), "");
+        Card(T("gen.update.daily"), T("gen.update.daily.desc"), Toggle("general.checkUpdatesDaily"));
         var diagStatus = Note();
         diagStatus.Visibility = Visibility.Collapsed;
         var export = ActionButton(T("gen.diag.export"), async () =>
@@ -696,20 +697,22 @@ internal sealed partial class SettingsWindow
             var detail = status.Phase switch
             {
                 UpdatePhase.Checking => T("gen.update.checking"),
+                UpdatePhase.Available => Loc.F("gen.update.available", status.Version!),
                 UpdatePhase.Current => T("gen.update.current"),
                 UpdatePhase.Downloading => Loc.F("gen.update.downloading", status.Version!, status.Percent),
                 UpdatePhase.Verifying => Loc.F("gen.update.verifying", status.Version!),
                 UpdatePhase.Ready => Loc.F("gen.update.ready", status.Version!),
+                UpdatePhase.Installing => Loc.F("gen.update.installing", status.Version!),
                 UpdatePhase.Failed => (status.Version is null ? "" : Loc.F("gen.version", status.Version) + " · ") + T("gen.update.error." + status.Error),
                 _ => "",
             };
             versionText.Text = string.IsNullOrEmpty(detail) ? version : version + " · " + detail;
-            update.IsEnabled = status.Phase is not (UpdatePhase.Checking or UpdatePhase.Downloading or UpdatePhase.Verifying);
+            update.IsEnabled = status.Phase is not (UpdatePhase.Checking or UpdatePhase.Downloading or UpdatePhase.Verifying or UpdatePhase.Installing);
             update.Content = T(status.Phase == UpdatePhase.Failed ? "gen.update.retry" : "gen.update");
             progress.Visibility = update.IsEnabled ? Visibility.Collapsed : Visibility.Visible;
-            progress.IsIndeterminate = status.Phase is UpdatePhase.Checking or UpdatePhase.Verifying;
+            progress.IsIndeterminate = status.Phase is UpdatePhase.Checking or UpdatePhase.Verifying or UpdatePhase.Installing;
             progress.Value = status.Percent;
-            downloads.Visibility = status.Phase == UpdatePhase.Ready ? Visibility.Visible : Visibility.Collapsed;
+            downloads.Visibility = status.DownloadPath is not null ? Visibility.Visible : Visibility.Collapsed;
         }
         void Updated(UpdateStatus status)
         {
@@ -724,12 +727,7 @@ internal sealed partial class SettingsWindow
             Render(updater.Status);
         };
         Render(updater.Status);
-        update.Click += async (_, _) =>
-        {
-            var directory = Path.Combine(EngineHost.TestConfigDir ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiveListen"), "Updates");
-            await updater.CheckAsync(EngineHost.Version, directory, File.Exists(Path.Combine(AppContext.BaseDirectory, "Uninstall.exe")));
-        };
+        update.Click += async (_, _) => await app.CheckUpdateAsync();
         downloads.Click += (_, _) =>
         {
             if (updater.Status.DownloadPath is { } path && Path.GetDirectoryName(path) is { } directory)

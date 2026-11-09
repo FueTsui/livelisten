@@ -1,5 +1,14 @@
 # 更新日志
 
+## [v0.1.3](https://github.com/FueTsui/livelisten/releases/tag/v0.1.3)（2026-11-09）
+
+- 随手记默认改为 `Ctrl+Right`，松开右方向键保存。升级时迁移旧默认键，保留自定义及禁用绑定。
+
+- 默认每天检查一次更新，发现新版时提醒，可在通用设置关闭。
+- 手动点击「检查更新」后，安装版下载并校验新包，再自动升级和重启。便携版提供 ZIP 下载。
+
+更新服务 15 项检查通过。用模拟版本响应和隔离安装目录验证了下载、校验、旧版退出、新版启动，以及设置、卡片和 Markdown 文档的哈希保留。Windows x64 Release 构建通过。
+
 ## [v0.1.2](https://github.com/FueTsui/livelisten/releases/tag/v0.1.2)（2026-11-09）
 
 - 按住 `Ctrl+Left` 录随手记，松开左方向键结束。持续记录可用 `Ctrl+Alt+N` 或托盘的「随手记」。

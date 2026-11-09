@@ -8,7 +8,7 @@
 
 说话即写入当前输入框；电脑里播放的声音实时变成字幕；一句话记成桌面卡片。
 
-![Version](https://img.shields.io/badge/version-0.1.2-blue)
+![Version](https://img.shields.io/badge/version-0.1.3-blue)
 [![GitHub Release](https://img.shields.io/github/v/release/FueTsui/livelisten)](https://github.com/FueTsui/livelisten/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -48,7 +48,7 @@
 1. **先核对校验值**：
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.2-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
    ```
 
    结果应与 `SHA256SUMS.txt` 中对应行一致；不一致时不要运行。
@@ -72,7 +72,7 @@
 | 按住右 <kbd>Ctrl</kbd> | 听写：说话写入当前输入框，松开结束 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | 开始或结束持续听写 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | 开关实时字幕 |
-| 按住 <kbd>Ctrl</kbd>+<kbd>←</kbd> | 录随手记，松开左方向键后结束并保存 |
+| 按住 <kbd>Ctrl</kbd>+<kbd>→</kbd> | 录随手记，松开右方向键后结束并保存 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | 启动托盘同款随手记录音，再按或按普通键结束 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> | 在桌面新建空白随手记并打开编辑器 |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | 显示或隐藏卡片 |
@@ -119,7 +119,7 @@
 | 官方服务凭据 | Windows 凭据管理器；只在启动对应识别进程时传入，不写入命令行或日志 |
 | 诊断日志 | `%LOCALAPPDATA%\LiveListen\Logs`；不上传，只记录事件、错误码和长度，不记录识别文字或按键 |
 | 安装日志 | `%TEMP%\LiveListen-Setup-<时间>.log` / `LiveListen-Uninstall-<时间>.log` |
-| 检查更新 | 在设置「通用」中显示新版本并自动下载适用的更新包；校验通过后可打开下载位置，安装由用户启动 |
+| 检查更新 | 每天检查一次并提醒新版。在设置「通用」手动检查后，安装版下载并验证安装包，再自动升级。便携版下载 ZIP，解压后使用 |
 
 更多见 [SECURITY.md](SECURITY.md)。
 
@@ -219,7 +219,7 @@ live-listen config
 
 | 名称 | 作用 |
 | --- | --- |
-| `%APPDATA%\LiveListen\settings.json` | 设置，结构版本 5，`dictation.preconnectLevel` 为 `off`、`balanced` 或 `aggressive` |
+| `%APPDATA%\LiveListen\settings.json` | 设置，结构版本 6，`dictation.preconnectLevel` 为 `off`、`balanced` 或 `aggressive` |
 | Windows 凭据管理器 | 官方识别服务的密钥，在设置中填写；不进入配置文件、命令行或日志 |
 | `LIVE_LISTEN_CONFIG_DIR` | 测试用：设置、卡片和日志改放到该目录，作为独立实例运行，不写开机启动项；凭据仍与正式实例共用 |
 | `LIVE_LISTEN_TEST_AUDIO` / `LIVE_LISTEN_TEST_CAPTIONS_AUDIO` | 测试用：用 WAV 文件代替听写 / 字幕音频；音频仍会发给真实识别服务 |

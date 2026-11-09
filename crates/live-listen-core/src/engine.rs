@@ -2851,7 +2851,7 @@ for line in sys.stdin:
         assert_eq!(dup["display"], "Ctrl+Alt+C");
         let lone = call(&engine, json!({"cmd": "hotkey.check", "binding": "RAlt", "field": "toggle"}));
         assert_eq!(lone["conflict"], "modifier_only");
-        let hold = call(&engine, json!({"cmd": "hotkey.check", "binding": "Ctrl+Left", "field": "hold"}));
+        let hold = call(&engine, json!({"cmd": "hotkey.check", "binding": "Ctrl+Right", "field": "hold"}));
         assert_eq!(hold["valid"], true);
         assert_eq!(hold["conflict"], "duplicate");
         let note = call(&engine, json!({"cmd": "hotkey.check", "binding": "rightalt", "field": "note"}));

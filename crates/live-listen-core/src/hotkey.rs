@@ -1163,17 +1163,17 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_note_chord_ends_on_release_even_after_rebinding() {
+    fn note_chord_ends_on_release_even_after_rebinding() {
         let mut m = matcher();
-        m.set_notes(Some(b("Ctrl+N")), None, None);
+        m.set_notes(Some(b("Ctrl+Right")), None, None);
         let now = Instant::now();
         m.key(vk::LCONTROL, true, Mode::Normal, now);
-        let started = m.key(u16::from(b'N'), true, Mode::Normal, now);
+        let started = m.key(vk::RIGHT, true, Mode::Normal, now);
         assert!(started.swallow);
         assert_eq!(started.signals, [Signal::NoteHoldStart]);
         m.set_notes(Some(b("RAlt")), None, None);
         assert!(m.key(vk::LCONTROL, false, Mode::Normal, now).signals.is_empty());
-        let stopped = m.key(u16::from(b'N'), false, Mode::Normal, now);
+        let stopped = m.key(vk::RIGHT, false, Mode::Normal, now);
         assert!(stopped.swallow);
         assert_eq!(stopped.signals, [Signal::NoteHoldEnd]);
     }

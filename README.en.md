@@ -39,7 +39,7 @@ Download `LiveListen-Setup-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub 
 1. Compare the following SHA-256 value with the matching entry in `SHA256SUMS.txt`.
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.2-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer and choose **Install now**. The default path is `%LOCALAPPDATA%\Programs\LiveListen`. Custom options let you change the folder, shortcuts, startup, and whether to launch after installation.
@@ -58,7 +58,7 @@ Open **Settings** from the tray, select a microphone and speech provider, then p
 | Hold right <kbd>Ctrl</kbd> | Dictate into the active text field. Release to finish. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> | Start or stop continuous dictation. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle live captions. |
-| Hold <kbd>Ctrl</kbd>+<kbd>Left</kbd> | Record a voice note. Release the left arrow to finish and save. |
+| Hold <kbd>Ctrl</kbd>+<kbd>Right</kbd> | Record a voice note. Release the right arrow to finish and save. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | Start a voice note like the tray command. Press again or press a regular key to finish. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> | Create and edit a blank desktop note. |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> | Show or hide desktop cards. |

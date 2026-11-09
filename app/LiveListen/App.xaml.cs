@@ -18,7 +18,8 @@ public partial class App : Application
     private OverlayContextMenu? overlayMenu;
     private CaptionsWindow? captions;
     private SettingsWindow? settingsWindow;
-    private bool exiting;
+    private volatile bool exiting;
+    private DispatcherQueueTimer? updateTimer;
     private int exitVersion;
     private long stateVersion;
     private long cardsVersion;
@@ -158,6 +159,7 @@ public partial class App : Application
         {
             OpenSettings();
         }
+        SyncDailyUpdateChecks();
     }
 
     /// <summary>
@@ -265,6 +267,7 @@ public partial class App : Application
         if (refresh.Theme) settingsWindow?.ApplyTheme();
         if (refresh.Cards) Cards.Refresh();
         settingsWindow?.OnSettingsChanged(path);
+        if (path is "*" or "general.checkUpdatesDaily") SyncDailyUpdateChecks();
     }
 
     private IReadOnlyList<TrayItem> BuildMenu() => exiting ? [] :
@@ -354,6 +357,53 @@ public partial class App : Application
         settingsWindow.Open(page);
     }
 
+    private static string UpdatesDirectory => Path.Combine(EngineHost.TestConfigDir ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiveListen"), "Updates");
+
+    private static bool IsInstalled => File.Exists(Path.Combine(AppContext.BaseDirectory, "install-record.json"))
+        && File.Exists(Path.Combine(AppContext.BaseDirectory, "Uninstall.exe"));
+
+    private void SyncDailyUpdateChecks()
+    {
+        // Isolated UI instances must not schedule network traffic or run an installer.
+        if (EngineHost.TestConfigDir is not null || exiting) return;
+        if (!Settings.Bool("general.checkUpdatesDaily"))
+        {
+            updateTimer?.Stop();
+            return;
+        }
+        if (updateTimer is null)
+        {
+            updateTimer = dispatcher.CreateTimer();
+            updateTimer.Interval = TimeSpan.FromMinutes(15);
+            updateTimer.Tick += (_, _) => _ = CheckDailyUpdateAsync();
+        }
+        if (updateTimer.IsRunning) return;
+        updateTimer.Start();
+        _ = CheckDailyUpdateAsync();
+    }
+
+    private async Task CheckDailyUpdateAsync()
+    {
+        if (exiting || !Settings.Bool("general.checkUpdatesDaily")) return;
+        var version = await UpdateService.Shared.CheckDailyAsync(EngineHost.Version, UpdatesDirectory, IsInstalled,
+            DateOnly.FromDateTime(DateTime.Now));
+        if (version is not null && !exiting && Settings.Bool("general.checkUpdatesDaily"))
+            tray?.Notify(Loc.T("app.name"), Loc.F("gen.update.available", version));
+    }
+
+    internal Task CheckUpdateAsync()
+    {
+        if (exiting) return Task.CompletedTask;
+        var installed = IsInstalled;
+        return UpdateService.Shared.CheckAsync(EngineHost.Version, UpdatesDirectory, installed,
+            install: installed && EngineHost.TestConfigDir is null ? InstallUpdateAsync : null);
+    }
+
+    private Task InstallUpdateAsync(string package, CancellationToken token) =>
+        exiting ? Task.FromException(new UpdateException("install"))
+            : UpdateInstaller.RunAsync(package, AppContext.BaseDirectory, token);
+
     internal void OpenFolder(string path)
     {
         if (Directory.Exists(path))
@@ -404,6 +454,7 @@ public partial class App : Application
             captions?.Close();
             overlayMenu?.Dispose();
             Bar.Close();
+            updateTimer?.Stop();
             tray?.Dispose();
             Exit();
         }

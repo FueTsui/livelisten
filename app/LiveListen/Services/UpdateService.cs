@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -5,18 +6,19 @@ using System.Text.Json;
 
 namespace LiveListen.Services;
 
-internal enum UpdatePhase { Idle, Checking, Current, Downloading, Verifying, Ready, Failed }
+internal enum UpdatePhase { Idle, Checking, Available, Current, Downloading, Verifying, Ready, Installing, Failed }
 
 internal sealed record UpdateStatus(UpdatePhase Phase, string? Version = null, int Percent = 0,
     string? DownloadPath = null, string? Error = null);
 
-/// <summary>Downloads verified release assets without executing them or replacing an installation.</summary>
+/// <summary>Checks for releases and hands off verified installer assets only on a manual request.</summary>
 internal sealed class UpdateService
 {
     private static readonly Uri Latest = new("https://api.github.com/repos/FueTsui/livelisten/releases/latest");
     private const int MetadataLimit = 2 * 1024 * 1024;
     private readonly HttpClient client;
     private readonly SemaphoreSlim gate = new(1, 1);
+    private int manualCheck;
 
     public static UpdateService Shared { get; } = new(new HttpClient(new HttpClientHandler
     {
@@ -28,22 +30,50 @@ internal sealed class UpdateService
     public UpdateStatus Status { get; private set; } = new(UpdatePhase.Idle);
     public event Action<UpdateStatus>? Changed;
 
-    public async Task CheckAsync(string currentVersion, string downloadDirectory, bool installed,
-        CancellationToken cancellationToken = default)
+    /// <summary>Checks metadata at most once per local day, across app restarts.</summary>
+    public async Task<string?> CheckDailyAsync(string currentVersion, string downloadDirectory, bool installed, DateOnly localDate)
     {
-        if (!await gate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
-        string? partial = null;
-        string? version = null;
+        if (Volatile.Read(ref manualCheck) != 0 || !await gate.WaitAsync(0).ConfigureAwait(false)) return null;
         try
         {
+            var today = localDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var stamp = Path.Combine(downloadDirectory, "last-daily-check.txt");
+            if (File.Exists(stamp) && await File.ReadAllTextAsync(stamp).ConfigureAwait(false) == today) return null;
+            // Record the attempt before making a request so failures don't trigger repeated checks.
+            Directory.CreateDirectory(downloadDirectory);
+            await File.WriteAllTextAsync(stamp, today).ConfigureAwait(false);
+
+            var release = await LatestReleaseAsync(currentVersion, installed, CancellationToken.None).ConfigureAwait(false);
+            if (Volatile.Read(ref manualCheck) != 0) return null;
+            if (release is not null && Status.Phase is UpdatePhase.Idle or UpdatePhase.Current or UpdatePhase.Available)
+                Set(new(UpdatePhase.Available, release.Version));
+            else if (release is null && Status.Phase == UpdatePhase.Available)
+                Set(new(UpdatePhase.Idle));
+            return release?.Version;
+        }
+        catch (Exception error) when (error is UpdateException or OperationCanceledException or HttpRequestException
+            or JsonException or IOException or UnauthorizedAccessException)
+        {
+            // Background failures are silent. A manual check can retry and show the reason.
+            return null;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task CheckAsync(string currentVersion, string downloadDirectory, bool installed,
+        CancellationToken cancellationToken = default, Func<string, CancellationToken, Task>? install = null)
+    {
+        if (Interlocked.Exchange(ref manualCheck, 1) != 0) return;
+        var acquired = false;
+        string? partial = null;
+        string? version = null;
+        string? verified = null;
+        try
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            acquired = true;
             Set(new(UpdatePhase.Checking));
-            using var metadataTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            metadataTimeout.CancelAfter(TimeSpan.FromSeconds(30));
-            using var response = await GetAsync(Latest, metadataTimeout.Token).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.NotFound) throw new UpdateException("unavailable");
-            CheckResponse(response);
-            var json = await ReadLimitedAsync(response, MetadataLimit, metadataTimeout.Token).ConfigureAwait(false);
-            var release = UpdateRelease.Parse(json, currentVersion, installed);
+            var release = await LatestReleaseAsync(currentVersion, installed, cancellationToken).ConfigureAwait(false);
             if (release is null)
             {
                 Set(new(UpdatePhase.Current));
@@ -93,9 +123,23 @@ internal sealed class UpdateService
                 throw new UpdateException("integrity");
             File.Move(partial, destination);
             partial = null;
-            Set(new(UpdatePhase.Ready, version, 100, destination));
+            if (installed && install is not null)
+            {
+                // Verify the bytes on disk and hold the executable open without write sharing
+                // until the installer has finished. It can still read its appended payload.
+                await using var executable = new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                var digest = await SHA256.HashDataAsync(executable, cancellationToken).ConfigureAwait(false);
+                if (!CryptographicOperations.FixedTimeEquals(digest, Convert.FromHexString(release.Sha256)))
+                    throw new UpdateException("integrity");
+                verified = destination;
+                Set(new(UpdatePhase.Installing, version, 100));
+                await install(destination, cancellationToken).ConfigureAwait(false);
+                Set(new(UpdatePhase.Current));
+            }
+            else Set(new(UpdatePhase.Ready, version, 100, destination));
         }
-        catch (UpdateException error) { Set(new(UpdatePhase.Failed, version, Error: error.Code)); }
+        catch (UpdateException error) { Set(new(UpdatePhase.Failed, version, DownloadPath: verified, Error: error.Code)); }
         catch (OperationCanceledException) { Set(new(UpdatePhase.Failed, version, Error: "timeout")); }
         catch (HttpRequestException) { Set(new(UpdatePhase.Failed, version, Error: "network")); }
         catch (HttpIOException) { Set(new(UpdatePhase.Failed, version, Error: "network")); }
@@ -110,8 +154,20 @@ internal sealed class UpdateService
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
-            gate.Release();
+            if (acquired) gate.Release();
+            Volatile.Write(ref manualCheck, 0);
         }
+    }
+
+    private async Task<UpdateRelease?> LatestReleaseAsync(string currentVersion, bool installed, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        using var response = await GetAsync(Latest, timeout.Token).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) throw new UpdateException("unavailable");
+        CheckResponse(response);
+        var json = await ReadLimitedAsync(response, MetadataLimit, timeout.Token).ConfigureAwait(false);
+        return UpdateRelease.Parse(json, currentVersion, installed);
     }
 
     private void Set(UpdateStatus status)

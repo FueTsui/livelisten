@@ -43,6 +43,10 @@ var checks = new (string Name, Func<Task> Run)[]
     ("malformed and oversized metadata remain retryable", MetadataErrors),
     ("concurrent clicks share the active operation", Concurrent),
     ("closed observers cannot interrupt a download", BrokenObserver),
+    ("daily checks request metadata only and persist across restarts", DailyChecks),
+    ("manual installation waits for the daily query and runs once", ManualDuringDailyCheck),
+    ("portable and corrupted packages are never executed", NeverInstallUnverifiedOrPortable),
+    ("an installer failure exposes the verified package for diagnosis", InstallerFailure),
 };
 foreach (var (name, run) in checks)
 {
@@ -234,6 +238,82 @@ async Task BrokenObserver()
     service.Changed += _ => throw new InvalidOperationException("closed view");
     await service.CheckAsync("0.1.0", DirectoryFor("observer"), true);
     Check(service.Status.Phase == UpdatePhase.Ready, "view exception interrupted download");
+}
+
+async Task DailyChecks()
+{
+    var directory = DirectoryFor("daily");
+    var day = new DateOnly(2026, 11, 9);
+    var requests = 0;
+    var service = Service((_, index) =>
+    {
+        requests++;
+        if (index != 1) throw new InvalidOperationException("daily check requested an asset");
+        return Task.FromResult(Metadata());
+    });
+    Check(await service.CheckDailyAsync("0.1.0", directory, true, day) == "0.2.0", "missing daily notice");
+    Check(service.Status is { Phase: UpdatePhase.Available, Version: "0.2.0", DownloadPath: null }, "daily check became a download");
+    Check(requests == 1 && !Directory.EnumerateDirectories(directory).Any(), "daily check downloaded a package");
+
+    var restarted = Service((_, _) => { requests++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)); });
+    Check(await restarted.CheckDailyAsync("0.1.0", directory, true, day) is null && requests == 1, "restart checked again");
+    Check(await restarted.CheckDailyAsync("0.1.0", directory, true, day.AddDays(1)) is null, "failed query announced an update");
+    Check(restarted.Status.Phase == UpdatePhase.Idle, "background failure changed the visible status");
+    Check(await restarted.CheckDailyAsync("0.1.0", directory, true, day.AddDays(1)) is null && requests == 2,
+        "background failure was retried on the same day");
+}
+
+async Task ManualDuringDailyCheck()
+{
+    var directory = DirectoryFor("daily-then-install");
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var response = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var service = Service((request, index) =>
+    {
+        if (index == 1) { entered.SetResult(); return response.Task; }
+        if (index == 2) return Task.FromResult(Metadata());
+        Check(index == 3 && request.RequestUri!.AbsolutePath.EndsWith("LiveListen-Setup-0.2.0-x64.exe"), "wrong download");
+        return Task.FromResult(Body());
+    });
+    var installed = 0;
+    Task Install(string path, CancellationToken _)
+    {
+        Check(service.Status is { Phase: UpdatePhase.Installing, Version: "0.2.0" }, "installer ran without an installing state");
+        Check(File.ReadAllBytes(path).SequenceEqual(payload), "installer received unverified bytes");
+        installed++;
+        return Task.CompletedTask;
+    }
+
+    var daily = service.CheckDailyAsync("0.1.0", directory, true, new DateOnly(2026, 11, 9));
+    await entered.Task;
+    var manual = service.CheckAsync("0.1.0", directory, true, install: Install);
+    Check(!manual.IsCompleted, "manual click was lost while the daily check was active");
+    await service.CheckAsync("0.1.0", directory, true, install: Install);
+    response.SetResult(Metadata());
+    Check(await daily is null, "daily check announced a release already requested by the user");
+    await manual;
+    Check(installed == 1 && service.Status.Phase == UpdatePhase.Current, "verified installer was not run exactly once");
+}
+
+async Task NeverInstallUnverifiedOrPortable()
+{
+    static Task Install(string _, CancellationToken __) => throw new InvalidOperationException("unexpected execution");
+    var portable = Service((_, index) => Task.FromResult(index == 1 ? Metadata() : Body()));
+    await portable.CheckAsync("0.1.0", DirectoryFor("portable-no-install"), false, install: Install);
+    Check(portable.Status.Phase == UpdatePhase.Ready, "portable update did not remain downloadable");
+
+    var corrupt = Service((_, index) => Task.FromResult(index == 1 ? Metadata() : Body(new byte[payload.Length])));
+    await corrupt.CheckAsync("0.1.0", DirectoryFor("invalid-no-install"), true, install: Install);
+    Check(corrupt.Status is { Phase: UpdatePhase.Failed, Error: "integrity", DownloadPath: null }, "corrupt installer became ready");
+}
+
+async Task InstallerFailure()
+{
+    var service = Service((_, index) => Task.FromResult(index == 1 ? Metadata() : Body()));
+    await service.CheckAsync("0.1.0", DirectoryFor("install-failed"), true,
+        install: (_, _) => throw new UpdateException("install"));
+    Check(service.Status is { Phase: UpdatePhase.Failed, Error: "install", DownloadPath: not null } &&
+        File.Exists(service.Status.DownloadPath), "installer failure was hidden or lost its verified package");
 }
 
 sealed class FixtureHandler(Func<HttpRequestMessage, int, Task<HttpResponseMessage>> respond) : HttpMessageHandler

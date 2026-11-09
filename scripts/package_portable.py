@@ -23,7 +23,7 @@ import zipfile
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 LOCK = ROOT / "scripts/release-dependencies.json"
 INSTALL_MANIFEST = ROOT / "setup/install-manifest.json"
 VENDOR_FILES = ("__init__.py", "doubao.py", "protocol.py", "LICENSE", "UPSTREAM.md")

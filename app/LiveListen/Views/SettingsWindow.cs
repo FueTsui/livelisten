@@ -270,7 +270,8 @@ internal sealed partial class SettingsWindow : Window
         Controls.Overlay.BringToFront(this);
     }
 
-    private JsonNode? PageSettings(string tag) => s.Get(tag == "dictation" ? "dictation" : "general.startWithWindows");
+    private JsonNode? PageSettings(string tag) => tag == "dictation" ? s.Get("dictation")
+        : new JsonArray(s.Bool("general.startWithWindows"), s.Bool("general.checkUpdatesDaily"));
 
     public void ApplyTheme()
     {
