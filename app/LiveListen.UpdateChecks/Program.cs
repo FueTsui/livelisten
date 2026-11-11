@@ -47,6 +47,9 @@ var checks = new (string Name, Func<Task> Run)[]
     ("manual installation waits for the daily query and runs once", ManualDuringDailyCheck),
     ("portable and corrupted packages are never executed", NeverInstallUnverifiedOrPortable),
     ("an installer failure exposes the verified package for diagnosis", InstallerFailure),
+    ("proxy modes select the system, no or a custom proxy and refuse unusable addresses", ProxyModes),
+    ("the connection test reports reachability, failures and timeouts without changing update state", ConnectionTest),
+    ("a failed daily check stays silent and a later manual check still works", DailyFailureThenManual),
 };
 foreach (var (name, run) in checks)
 {
@@ -305,6 +308,79 @@ async Task NeverInstallUnverifiedOrPortable()
     var corrupt = Service((_, index) => Task.FromResult(index == 1 ? Metadata() : Body(new byte[payload.Length])));
     await corrupt.CheckAsync("0.1.0", DirectoryFor("invalid-no-install"), true, install: Install);
     Check(corrupt.Status is { Phase: UpdatePhase.Failed, Error: "integrity", DownloadPath: null }, "corrupt installer became ready");
+}
+
+Task ProxyModes()
+{
+    using var system = UpdateService.CreateHandler("system", "");
+    Check(system.UseProxy && system.Proxy is null && !system.AllowAutoRedirect, "system mode must keep the Windows proxy settings");
+    using var direct = UpdateService.CreateHandler("direct", "http://127.0.0.1:7890");
+    Check(!direct.UseProxy && direct.Proxy is null, "direct mode still uses a proxy");
+    using var custom = UpdateService.CreateHandler("custom", " http://127.0.0.1:7890 ");
+    var target = new Uri("https://api.github.com/");
+    Check(custom.UseProxy && custom.Proxy?.GetProxy(target) is { Host: "127.0.0.1", Port: 7890 }, "custom proxy address was not applied");
+    using var socks = UpdateService.CreateHandler("custom", "socks5://proxy.example:1080");
+    Check(socks.Proxy?.GetProxy(target) is { Scheme: "socks5", Port: 1080 }, "socks5 proxy was not accepted");
+    foreach (var bad in new[] { "", "127.0.0.1:7890", "ftp://proxy.example:21", "http://user:secret@proxy.example:8080",
+        "http://proxy.example:8080/path", "http://", "not a url" })
+    {
+        Check(UpdateService.ProxyUri(bad) is null, "unusable proxy address was accepted: " + bad);
+        using var fallback = UpdateService.CreateHandler("custom", bad);
+        Check(fallback.UseProxy && fallback.Proxy is null, "unusable proxy address did not fall back to the system settings");
+    }
+    using var unknown = UpdateService.CreateHandler("something-else", "http://127.0.0.1:1");
+    Check(unknown.UseProxy && unknown.Proxy is null, "unknown mode did not behave like system");
+    return Task.CompletedTask;
+}
+
+async Task ConnectionTest()
+{
+    var reached = Service((request, _) =>
+    {
+        Check(request.RequestUri!.Host == "api.github.com" && request.Headers.UserAgent.ToString() == "LiveListen-Updater/1.0",
+            "connection test asked an unexpected address or identified itself differently");
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
+    });
+    var ok = await reached.TestConnectionAsync();
+    Check(ok is { Ok: true, Error: "" } && reached.Status.Phase == UpdatePhase.Idle, "a reachable service was not reported or changed update state");
+    // A rate-limit answer still proves that the service was reached through the proxy.
+    var limited = await Service((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden))).TestConnectionAsync();
+    Check(limited.Ok, "an HTTP answer was reported as unreachable");
+    var refused = await Service((_, _) => throw new HttpRequestException("refused")).TestConnectionAsync();
+    Check(refused is { Ok: false, Error: "network" }, "a refused connection was not reported as a network failure");
+    using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+    var slow = await Service(async (_, _) =>
+    {
+        await Task.Delay(Timeout.Infinite, cancel.Token);
+        return new HttpResponseMessage(HttpStatusCode.OK);
+    }).TestConnectionAsync(cancel.Token);
+    Check(slow is { Ok: false, Error: "timeout" }, "a silent proxy was not reported as a timeout");
+    var escaped = await Service((_, _) =>
+    {
+        var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+        redirect.Headers.Location = new Uri("https://example.com/");
+        return Task.FromResult(redirect);
+    }).TestConnectionAsync();
+    Check(!escaped.Ok, "the connection test followed a redirect away from the update service");
+}
+
+async Task DailyFailureThenManual()
+{
+    var directory = DirectoryFor("daily-failure");
+    var calls = 0;
+    var service = Service((_, _) =>
+    {
+        calls++;
+        if (calls == 1) throw new HttpRequestException("offline");
+        return Task.FromResult(calls == 2 ? Metadata() : Body());
+    });
+    var today = new DateOnly(2026, 11, 11);
+    Check(await service.CheckDailyAsync("0.1.0", directory, false, today) is null && service.Status.Phase == UpdatePhase.Idle,
+        "a failed daily check surfaced an error or a version");
+    Check(await service.CheckDailyAsync("0.1.0", directory, false, today) is null && calls == 1,
+        "a failed daily check was repeated on the same day");
+    await service.CheckAsync("0.1.0", directory, false);
+    Check(service.Status.Phase == UpdatePhase.Ready && calls == 3, "a manual check after a failed daily check did not complete");
 }
 
 async Task InstallerFailure()

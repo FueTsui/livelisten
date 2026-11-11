@@ -448,6 +448,10 @@ pub struct GeneralSettings {
     pub start_with_windows: bool,
     /// Check release metadata once a day without downloading or installing updates.
     pub check_updates_daily: bool,
+    /// Proxy for update checks and downloads: `system`, `direct` or `custom`.
+    pub proxy_mode: String,
+    /// `http://host:port` (also `https` or `socks5`) used when the mode is `custom`.
+    pub proxy_url: String,
     pub bar_position: Option<Position>,
     /// Screen-space visual center for fixed-canvas scaling; old top-left remains compatible.
     pub bar_visual_center: Option<Position>,
@@ -462,6 +466,8 @@ impl Default for GeneralSettings {
         Self {
             start_with_windows: false,
             check_updates_daily: true,
+            proxy_mode: "system".into(),
+            proxy_url: String::new(),
             bar_position: None,
             bar_visual_center: None,
             captions_position: None,
@@ -549,6 +555,10 @@ impl Settings {
             issues.push(Issue { field: "services.speech".into(), code: "unknown".into() });
             s.speech = DOUBAO_ID.into();
         }
+        if !matches!(self.general.proxy_mode.as_str(), "system" | "direct" | "custom") {
+            self.general.proxy_mode = "system".into();
+        }
+        self.general.proxy_url = self.general.proxy_url.trim().to_string();
         let a = &mut self.appearance;
         a.voice_scale = finite_or(a.voice_scale, 1.5).clamp(1.0, 3.0);
         a.ribbon_scale = finite_or(a.ribbon_scale, 1.5).clamp(1.0, 3.0);

@@ -668,6 +668,58 @@ internal sealed partial class SettingsWindow
     {
         Card(T("gen.startup.title"), null, Toggle("general.startWithWindows"), "");
         Card(T("gen.update.daily"), T("gen.update.daily.desc"), Toggle("general.checkUpdatesDaily"));
+        var proxyStatus = Note();
+        proxyStatus.Visibility = Visibility.Collapsed;
+        void ProxyNote(string text)
+        {
+            proxyStatus.Text = text;
+            proxyStatus.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        var proxyUrl = new TextBox
+        {
+            PlaceholderText = "http://127.0.0.1:7890",
+            Text = s.Str("general.proxyUrl"),
+            Width = 240,
+            Visibility = s.Str("general.proxyMode", "system") == "custom" ? Visibility.Visible : Visibility.Collapsed,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(proxyUrl, T("gen.proxy.address"));
+        bool CommitProxyUrl()
+        {
+            var text = proxyUrl.Text.Trim();
+            if (text.Length > 0 && UpdateService.ProxyUri(text) is null)
+            {
+                ProxyNote(T("gen.proxy.invalid"));
+                return false;
+            }
+            if (!settingsClosed && text != s.Str("general.proxyUrl")) Set("general.proxyUrl", text);
+            return true;
+        }
+        proxyUrl.LostFocus += (_, _) => { if (CommitProxyUrl() && proxyStatus.Text == T("gen.proxy.invalid")) ProxyNote(""); };
+        var proxyMode = Combo("general.proxyMode",
+            [("system", T("gen.proxy.system")), ("direct", T("gen.proxy.direct")), ("custom", T("gen.proxy.custom"))], 150,
+            mode =>
+            {
+                proxyUrl.Visibility = mode == "custom" ? Visibility.Visible : Visibility.Collapsed;
+                ProxyNote("");
+            });
+        var proxyTest = new Button { Content = T("gen.proxy.test"), MinWidth = 88 };
+        proxyTest.Click += async (_, _) =>
+        {
+            var testPageVersion = pageVersion;
+            if (s.Str("general.proxyMode", "system") == "custom" && (!CommitProxyUrl() || proxyUrl.Text.Trim().Length == 0))
+            {
+                ProxyNote(T("gen.proxy.invalid"));
+                return;
+            }
+            app.ApplyProxy();
+            proxyTest.IsEnabled = false;
+            ProxyNote(T("gen.proxy.testing"));
+            var result = await UpdateService.Shared.TestConnectionAsync();
+            if (settingsClosed || pageVersion != testPageVersion) return;
+            proxyTest.IsEnabled = true;
+            ProxyNote(result.Ok ? Loc.F("gen.proxy.ok", result.Milliseconds) : T("gen.proxy.fail." + result.Error));
+        };
+        Card(T("gen.proxy.title"), T("gen.proxy.desc"), Horizontal(proxyMode, proxyUrl, proxyTest), null, out _, footer: proxyStatus);
         var diagStatus = Note();
         diagStatus.Visibility = Visibility.Collapsed;
         var export = ActionButton(T("gen.diag.export"), async () =>

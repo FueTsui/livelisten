@@ -39,7 +39,7 @@ Download `LiveListen-Setup-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub 
 1. Compare the following SHA-256 value with the matching entry in `SHA256SUMS.txt`.
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.4-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer and choose **Install now**. The default path is `%LOCALAPPDATA%\Programs\LiveListen`. Custom options let you change the folder, shortcuts, startup, and whether to launch after installation.

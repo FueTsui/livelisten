@@ -278,7 +278,8 @@ internal sealed partial class SettingsWindow : Window
     }
 
     private JsonNode? PageSettings(string tag) => tag == "dictation" ? s.Get("dictation")
-        : new JsonArray(s.Bool("general.startWithWindows"), s.Bool("general.checkUpdatesDaily"));
+        : new JsonArray(s.Bool("general.startWithWindows"), s.Bool("general.checkUpdatesDaily"),
+            s.Str("general.proxyMode", "system"), s.Str("general.proxyUrl"));
 
     public void ApplyTheme()
     {

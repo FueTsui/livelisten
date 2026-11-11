@@ -168,6 +168,7 @@ public partial class App : Application
         {
             OpenSettings();
         }
+        ApplyProxy();
         SyncDailyUpdateChecks();
         RemoveOldUpdatePackages();
     }
@@ -326,6 +327,7 @@ public partial class App : Application
         if (refresh.Theme) settingsWindow?.ApplyTheme();
         if (refresh.Cards) Cards.Refresh();
         settingsWindow?.OnSettingsChanged(path);
+        if (path is "*" or "general" or "general.proxyMode" or "general.proxyUrl") ApplyProxy();
         if (path is "*" or "general.checkUpdatesDaily") SyncDailyUpdateChecks();
     }
 
@@ -431,6 +433,10 @@ public partial class App : Application
     }
 
     private DispatcherQueueTimer? settingsRelease;
+
+    /// <summary>Update checks and downloads use the proxy chosen in the general settings.</summary>
+    internal void ApplyProxy() =>
+        UpdateService.Shared.SetProxy(Settings.Str("general.proxyMode", "system"), Settings.Str("general.proxyUrl"));
 
     private DispatcherQueueTimer ReleaseTimer(Action tick)
     {

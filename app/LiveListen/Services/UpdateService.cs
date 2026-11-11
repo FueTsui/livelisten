@@ -16,15 +16,68 @@ internal sealed class UpdateService
 {
     private static readonly Uri Latest = new("https://api.github.com/repos/FueTsui/livelisten/releases/latest");
     private const int MetadataLimit = 2 * 1024 * 1024;
-    private readonly HttpClient client;
+    private HttpClient client;
+    private (string Mode, string Url) proxy = ("system", "");
     private readonly SemaphoreSlim gate = new(1, 1);
     private int manualCheck;
 
-    public static UpdateService Shared { get; } = new(new HttpClient(new HttpClientHandler
+    public static UpdateService Shared { get; } = new(NewClient("system", ""));
+
+    private static HttpClient NewClient(string mode, string url) =>
+        new(CreateHandler(mode, url)) { Timeout = Timeout.InfiniteTimeSpan };
+
+    /// <summary>
+    /// `system` follows the Windows proxy settings, `direct` uses none, `custom` uses the
+    /// given address. An unusable custom address falls back to the system settings.
+    /// </summary>
+    internal static HttpClientHandler CreateHandler(string mode, string url)
     {
-        AllowAutoRedirect = false,
-        UseCookies = false,
-    }) { Timeout = Timeout.InfiniteTimeSpan });
+        var handler = new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false };
+        if (mode == "direct") handler.UseProxy = false;
+        else if (mode == "custom" && ProxyUri(url) is { } address)
+        {
+            handler.Proxy = new WebProxy(address);
+            handler.UseProxy = true;
+        }
+        return handler;
+    }
+
+    /// <summary>A proxy address the app accepts, or null. Credentials in the address are refused.</summary>
+    internal static Uri? ProxyUri(string? text) =>
+        Uri.TryCreate(text?.Trim(), UriKind.Absolute, out var uri) && uri.Host.Length > 0 && uri.UserInfo.Length == 0
+            && uri.Scheme is "http" or "https" or "socks5" && uri.AbsolutePath is "/" or "" && uri.Query.Length == 0
+            ? uri : null;
+
+    /// <summary>Uses the proxy for the next request; a running download keeps its connection.</summary>
+    public void SetProxy(string mode, string url)
+    {
+        mode = mode is "direct" or "custom" ? mode : "system";
+        url = url.Trim();
+        if (proxy == (mode, url)) return;
+        proxy = (mode, url);
+        client = NewClient(mode, url);
+    }
+
+    /// <summary>
+    /// Asks the update service for its release information through the current proxy. Any
+    /// HTTP answer means the service was reached; the result carries the time it took.
+    /// </summary>
+    public async Task<(bool Ok, long Milliseconds, string Error)> TestConnectionAsync(CancellationToken token = default)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
+            using var response = await GetAsync(Latest, timeout.Token).ConfigureAwait(false);
+            return (true, watch.ElapsedMilliseconds, "");
+        }
+        catch (OperationCanceledException) { return (false, watch.ElapsedMilliseconds, "timeout"); }
+        catch (Exception error) when (error is HttpRequestException or HttpIOException or IOException or UpdateException)
+        {
+            return (false, watch.ElapsedMilliseconds, "network");
+        }
+    }
 
     public UpdateService(HttpClient client) => this.client = client;
     public UpdateStatus Status { get; private set; } = new(UpdatePhase.Idle);

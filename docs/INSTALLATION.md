@@ -1,6 +1,6 @@
 # 安装、升级与卸载
 
-适用于 LiveListen 0.1.3。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
+适用于 LiveListen 0.1.4。安装包和便携包见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases/latest)。
 
 ## 系统要求
 
@@ -12,10 +12,10 @@
 
 ## 核对校验值
 
-安装包 `LiveListen-Setup-0.1.3-x64.exe`、便携包 `LiveListen-0.1.3-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
+安装包 `LiveListen-Setup-0.1.4-x64.exe`、便携包 `LiveListen-0.1.4-portable-x64.zip` 和 `SHA256SUMS.txt` 位于同一输出目录。运行前先核对：
 
 ```powershell
-Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
+Get-FileHash .\LiveListen-Setup-0.1.4-x64.exe -Algorithm SHA256
 ```
 
 结果应与 `SHA256SUMS.txt` 中对应行一致，不一致时不要运行。校验值只证明文件没有变化，不能代替发布者签名或可信来源。
@@ -93,7 +93,7 @@ Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
 在 PowerShell 中读取退出码：
 
 ```powershell
-$p = Start-Process .\LiveListen-Setup-0.1.3-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
+$p = Start-Process .\LiveListen-Setup-0.1.4-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -Wait -PassThru
 $p.ExitCode
 ```
 
@@ -108,8 +108,8 @@ $p.ExitCode
 不想安装时，可使用便携包：
 
 ```powershell
-Expand-Archive -LiteralPath .\LiveListen-0.1.3-portable-x64.zip -DestinationPath .\LiveListen-0.1.3
-.\LiveListen-0.1.3\LiveListen\LiveListen.exe
+Expand-Archive -LiteralPath .\LiveListen-0.1.4-portable-x64.zip -DestinationPath .\LiveListen-0.1.4
+.\LiveListen-0.1.4\LiveListen\LiveListen.exe
 ```
 
 - 完整解压到一个新的普通文件夹，不要只复制 EXE，也不要在压缩包内运行。

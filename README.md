@@ -8,7 +8,7 @@
 
 说话即写入当前输入框；电脑里播放的声音实时变成字幕；一句话记成桌面卡片。
 
-![Version](https://img.shields.io/badge/version-0.1.3-blue)
+![Version](https://img.shields.io/badge/version-0.1.4-blue)
 [![GitHub Release](https://img.shields.io/github/v/release/FueTsui/livelisten)](https://github.com/FueTsui/livelisten/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -48,7 +48,7 @@
 1. **先核对校验值**：
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.3-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.4-x64.exe -Algorithm SHA256
    ```
 
    结果应与 `SHA256SUMS.txt` 中对应行一致；不一致时不要运行。
