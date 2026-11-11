@@ -22,6 +22,8 @@ internal sealed class VoiceVisual : Canvas
     internal const double OrbCenter = 116;
     internal const double OrbUnit = 34.0 / 59;
     internal const double HaloRadius = 2.4;
+    /// <summary>Radius of the loudest frame; a fixed bound for the window region.</summary>
+    internal const double MaxRadius = (59 + 5 + 18) * OrbUnit;
     private const double RibbonReferenceWidth = 664;
     private readonly VoiceMotion motion = new();
     private readonly DispatcherQueueTimer timer;

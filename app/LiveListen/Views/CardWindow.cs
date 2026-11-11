@@ -152,7 +152,12 @@ internal sealed partial class CardWindow : Window
         var center = new PointInt32(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
         var work = DisplayArea.GetFromPoint(center, DisplayAreaFallback.Nearest).WorkArea;
         var move = CardSnap.Offset(rect, work, app.Cards.CardRects(Id), Overlay.Scale(this), look.ShadowMargin);
-        return new PointInt32(p.X + move.X, p.Y + move.Y);
+        var x = rect.X + move.X;
+        var y = rect.Y + move.Y;
+        // The drawn card stays inside the work area, so it cannot be lost past an edge.
+        x = Math.Clamp(x, work.X, Math.Max(work.X, work.X + work.Width - rect.Width));
+        y = Math.Clamp(y, work.Y, Math.Max(work.Y, work.Y + work.Height - rect.Height));
+        return new PointInt32(p.X + x - rect.X, p.Y + y - rect.Y);
     }
 
     /// <summary>Places the card (its saved spot, or a free spot near the top right) and shows it.</summary>
@@ -182,8 +187,22 @@ internal sealed partial class CardWindow : Window
     {
         if (IsCardVisible) return;
         Fit();
+        // A reused window kept its old place in the window order and on a display that
+        // may be gone: bring it back where the user can see it, without taking focus.
+        KeepOnScreen();
         Overlay.ShowQuiet(this);
+        Overlay.RaiseQuiet(this);
     }
+
+    /// <summary>Moves the card back inside the nearest display's work area.</summary>
+    public void KeepOnScreen()
+    {
+        var position = AppWindow.Position;
+        Overlay.PlaceAt(this, position.X, position.Y);
+    }
+
+    /// <summary>Commits the text being edited without waiting; used when Windows shuts down.</summary>
+    public void CommitDraft() => editor.FinishEditing();
 
     public void HideCard()
     {
@@ -948,6 +967,22 @@ internal sealed class CardsHost(App app)
             var write = SaveStyleAsync(styleWrites, id, draft);
             styleWrites = write;
             Track(write);
+        }
+    }
+
+    /// <summary>The displays changed: no visible card may stay outside them.</summary>
+    public void KeepOnScreen()
+    {
+        foreach (var window in windows.Values.Where(window => window.IsCardVisible)) window.KeepOnScreen();
+    }
+
+    /// <summary>Starts saving every draft at once, without waiting for the replies.</summary>
+    public void CommitDrafts()
+    {
+        foreach (var window in windows.Values.ToArray())
+        {
+            try { window.CommitDraft(); }
+            catch (Exception) { }
         }
     }
 

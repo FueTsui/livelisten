@@ -102,7 +102,7 @@ public partial class App : Application
         Settings.Issues += issues =>
         {
             var text = Loc.F("issues.fixed", string.Join(", ", issues.Select(i => i.Field)));
-            if (settingsWindow is not null)
+            if (settingsWindow is { IsOpen: true })
             {
                 settingsWindow.ShowIssue(text);
             }
@@ -114,7 +114,7 @@ public partial class App : Application
         Settings.SaveFailed += code =>
         {
             var text = Loc.Error(code == "stopped" ? code : "save_failed");
-            if (settingsWindow is not null)
+            if (settingsWindow is { IsOpen: true })
             {
                 settingsWindow.ShowSettingsSaveFailure(code);
             }
@@ -142,6 +142,13 @@ public partial class App : Application
         tray = new TrayIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"), Loc.T("app.name"));
         tray.Clicked += ToggleBar;
         tray.Menu = BuildMenu;
+        tray.SessionEnding += OnSessionEnding;
+        tray.DisplayChanged += () =>
+        {
+            if (exiting) return;
+            Bar.EnsureOnScreen();
+            Cards.KeepOnScreen();
+        };
 
         Bar = new BarWindow(this);
         Cards = new CardsHost(this);
@@ -160,6 +167,56 @@ public partial class App : Application
             OpenSettings();
         }
         SyncDailyUpdateChecks();
+        RemoveOldUpdatePackages();
+    }
+
+    /// <summary>
+    /// Windows ends the process as soon as this returns, without the orderly exit: commit
+    /// card drafts and settings and let the core write everything, all on this thread.
+    /// </summary>
+    private void OnSessionEnding()
+    {
+        if (exiting) return;
+        exiting = true;
+        try
+        {
+            Cards?.CommitDrafts();
+            Bar.CommitScale();
+            // Draft patches travel on pool threads; give them a moment to reach the core
+            // before the shutdown command, which rejects everything after it.
+            Thread.Sleep(200);
+            Settings.SaveBlocking();
+            Engine.Call("shutdown");
+        }
+        catch (Exception error)
+        {
+            LogUi(error);
+        }
+    }
+
+    /// <summary>Installer packages of this or an older version are no longer needed.</summary>
+    private static void RemoveOldUpdatePackages()
+    {
+        if (EngineHost.TestConfigDir is not null || !Version.TryParse(EngineHost.Version, out var current)) return;
+        var folder = UpdatesDirectory;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                if (!Directory.Exists(folder)) return;
+                foreach (var directory in Directory.GetDirectories(folder))
+                {
+                    var name = Path.GetFileName(directory);
+                    var dash = name.IndexOf('-');
+                    if (dash <= 0 || !Version.TryParse(name[..dash], out var version) || version > current) continue;
+                    try { Directory.Delete(directory, recursive: true); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        });
     }
 
     /// <summary>
@@ -279,6 +336,7 @@ public partial class App : Application
         new(Loc.T("tray.showDictation"), ToggleDictationText, Settings.Bool("dictation.showText")),
         new(TrayShortcutLabel("tray.cards", "cards"), ToggleCards, Cards.Shown),
         TrayItem.Separator,
+        new(Loc.T("tray.resetBar"), () => { if (!exiting) Bar.ResetPosition(); }),
         new(Loc.T("tray.settings"), () => OpenSettings()),
         new(Loc.T("tray.exit"), Quit),
     ];

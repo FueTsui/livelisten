@@ -50,6 +50,7 @@ internal sealed partial class SettingsWindow
             ("aggressive", T("preconnect.aggressive.desc"))));
         dictationTextToggle = Toggle("dictation.showText");
         Card(T("dict.showText.title"), T("dict.showText.desc"), dictationTextToggle);
+        Card(T("dict.follow.title"), T("dict.follow.desc"), Toggle("dictation.followWindow"));
         Block(T("dict.writeMode.title"), T("dict.writeMode.desc"), Radios("dictation.writeMode",
             ("stable", T("writeMode.stable.desc")),
             ("live", T("writeMode.live.desc"))));

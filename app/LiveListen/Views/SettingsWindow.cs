@@ -142,6 +142,9 @@ internal sealed partial class SettingsWindow : Window
         root.AddHandler(UIElement.PointerPressedEvent, rootPointerPressed, true);
     }
 
+    /// <summary>False while the reused window is hidden; messages then belong on the bar.</summary>
+    public bool IsOpen => !settingsClosed;
+
     private void OnNavigationChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs e)
     {
         if (e.SelectedItem is NavigationViewItem { Tag: string tag }) ShowPage(tag);

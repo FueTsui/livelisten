@@ -181,9 +181,7 @@ impl Core {
             Some(id) => {
                 self.notes.markdown_dirty = true;
                 let kind = self.notes.cards.get(id).map(|c| c.kind).unwrap_or_default();
-                if !self.notes.cards.show_on_desktop {
-                    self.notes.cards.show_on_desktop = true;
-                }
+                // Cards the user hid stay hidden; the bar confirms that the note was saved.
                 // "Saved" only when it is on disk; otherwise the error was shown.
                 if self.save_cards().is_ok() {
                     log::info!("note saved as card {id} ({kind:?})");
@@ -197,6 +195,13 @@ impl Core {
 
     pub(super) fn set_cards_shown(&mut self, on: bool) {
         self.notes.cards.show_on_desktop = on;
+        // Every card was hidden one by one: showing the desktop cards brings them back,
+        // instead of a switch that appears to do nothing.
+        if on && !self.notes.cards.cards.iter().any(|c| c.visible && !c.archived) {
+            for card in self.notes.cards.cards.iter_mut().filter(|c| !c.archived) {
+                card.visible = true;
+            }
+        }
         let _ = self.save_cards();
         self.emit_cards();
     }

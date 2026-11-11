@@ -37,6 +37,12 @@ internal sealed unsafe class TrayIcon : IDisposable
     /// <summary>Single left click or keyboard selection on the icon.</summary>
     public event Action? Clicked;
 
+    /// <summary>Windows is shutting down or signing out; raised on the UI thread and must return quickly.</summary>
+    public event Action? SessionEnding;
+
+    /// <summary>The display layout or resolution changed.</summary>
+    public event Action? DisplayChanged;
+
     /// <summary>Builds the menu each time it opens, so checks are current.</summary>
     public Func<IReadOnlyList<TrayItem>>? Menu { get; set; }
 
@@ -224,6 +230,17 @@ internal sealed unsafe class TrayIcon : IDisposable
                     return true;
             }
             return true;
+        }
+        if (msg == WM_ENDSESSION && wParam != 0)
+        {
+            // The process ends when this returns; nothing may be queued for later.
+            SessionEnding?.Invoke();
+            return false;
+        }
+        if (msg == WM_DISPLAYCHANGE)
+        {
+            dispatcher.TryEnqueue(() => { if (!disposed) DisplayChanged?.Invoke(); });
+            return false;
         }
         if (msg == taskbarCreated && taskbarCreated != 0)
         {

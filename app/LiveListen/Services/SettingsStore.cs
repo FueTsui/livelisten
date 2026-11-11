@@ -104,6 +104,13 @@ internal sealed class SettingsStore
         return saves.SaveAsync();
     }
 
+    /// <summary>Writes the current settings on this thread; only for a Windows shutdown.</summary>
+    public void SaveBlocking()
+    {
+        saveTimer.Stop();
+        engine.Call("settings.set", new JsonObject { ["settings"] = Root.DeepClone() });
+    }
+
     private void ApplySaved(JsonObject reply)
     {
         if (reply["settings"] is JsonObject saved)

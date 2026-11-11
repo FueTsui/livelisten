@@ -89,6 +89,8 @@ pub struct DictationSettings {
     pub end_action: EndAction,
     /// Show live text in the floating bar; otherwise show only the animation.
     pub show_text: bool,
+    /// Show the floating bar inside the window being typed into when dictation starts.
+    pub follow_window: bool,
     /// Font size shared by dictation text and the floating bar's status messages.
     pub font_size: f32,
     /// Input device name; empty means the system default microphone.
@@ -106,6 +108,7 @@ impl Default for DictationSettings {
             write_mode: WriteMode::Stable,
             end_action: EndAction::EndOnly,
             show_text: true,
+            follow_window: true,
             font_size: 16.0,
             microphone: String::new(),
             preconnect_level: Preconnect::Off,

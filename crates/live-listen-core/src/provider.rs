@@ -83,6 +83,10 @@ impl SpecError {
 fn ancestors_containing(starts: &[PathBuf], relative: &Path) -> Option<PathBuf> {
     for start in starts {
         for dir in start.ancestors() {
+            // A drive root is writable by other users; never run code found there.
+            if dir.parent().is_none() {
+                break;
+            }
             if dir.join(relative).is_file() {
                 return Some(dir.to_path_buf());
             }

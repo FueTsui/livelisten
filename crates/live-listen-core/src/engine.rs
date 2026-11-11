@@ -2109,6 +2109,8 @@ impl Core {
                 "purpose": if d.purpose == Purpose::Note { "note" } else { "type" },
                 "paused": d.paused,
                 "blocked": d.blocked,
+                // The window being typed into, so the bar can appear next to it.
+                "target": d.target.map(|t| t.window),
             }),
         };
         let listening = self.captions.session.is_some() || self.captions.held_for_dictation;

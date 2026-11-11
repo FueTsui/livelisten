@@ -85,6 +85,9 @@ internal sealed partial class BarWindow : Window
     private double layoutScale = 3;
     private double captionReserve = 240;
     private Point? zoomAnchor;
+    private Point? followCenter;
+    private Point? homeCenter;
+    private Task visibilityCalls = Task.CompletedTask;
 
     public BarWindow(App app, Func<string, bool>? copyText = null)
     {
@@ -203,10 +206,12 @@ internal sealed partial class BarWindow : Window
 
     private void ShowNow()
     {
-        if (!placed) { Fit(); Place(); placed = true; }
+        EnsurePlaced();
+        // A display may have gone away since the bar was last shown.
+        if (followCenter is null) EnsureOnScreen();
         Overlay.Show(this);
         voice.SetShown(true);
-        _ = app.Engine.CallAsync("ui.visibility", new JsonObject { ["bar"] = true });
+        NotifyVisibility(true);
         QueueFit();
     }
 
@@ -216,7 +221,126 @@ internal sealed partial class BarWindow : Window
         autoShown = false;
         voice.SetShown(false);
         Overlay.Hide(this);
-        _ = app.Engine.CallAsync("ui.visibility", new JsonObject { ["bar"] = false });
+        NotifyVisibility(false);
+        ReturnHome();
+    }
+
+    private void EnsurePlaced()
+    {
+        if (!placed) { Fit(); Place(); placed = true; }
+    }
+
+    /// <summary>Tells the engine in call order: a quick show after a hide must end as shown.</summary>
+    private void NotifyVisibility(bool on)
+    {
+        var previous = visibilityCalls;
+        visibilityCalls = Send();
+        async Task Send()
+        {
+            try
+            {
+                await previous;
+                await app.Engine.CallAsync("ui.visibility", new JsonObject { ["bar"] = on });
+            }
+            catch (Exception)
+            {
+                // Level events are cosmetic; the next change sends the state again.
+            }
+        }
+    }
+
+    /// <summary>Where the visual's center is now, also before the content has loaded.</summary>
+    private Point CurrentCenter()
+    {
+        if (ScreenCenter() is { } center) return center;
+        var dpi = Overlay.Scale(this);
+        return new Point(AppWindow.Position.X + (body.Width / 2 + 8) * dpi,
+            AppWindow.Position.Y + (main.Height / 2 + body.Margin.Top) * dpi);
+    }
+
+    /// <summary>Keeps the whole drawn shape on the display nearest to the wanted center.</summary>
+    private Point ClampCenter(Point center)
+    {
+        var x = double.IsFinite(center.X) ? Math.Clamp(center.X, -1e9, 1e9) : 0;
+        var y = double.IsFinite(center.Y) ? Math.Clamp(center.Y, -1e9, 1e9) : 0;
+        var bounds = DisplayArea.GetFromPoint(new PointInt32((int)Math.Round(x), (int)Math.Round(y)),
+            DisplayAreaFallback.Nearest).OuterBounds;
+        var dpi = Overlay.Scale(this);
+        var marginX = Math.Min(bounds.Width / 2.0, ((voice.IsRibbon ? 116 : CaptionExtent) * targetScale + 8) * dpi);
+        var marginY = Math.Min(bounds.Height / 2.0, (CaptionExtent * targetScale + 8) * dpi);
+        return new Point(Math.Clamp(x, bounds.X + marginX, bounds.X + bounds.Width - marginX),
+            Math.Clamp(y, bounds.Y + marginY, bounds.Y + bounds.Height - marginY));
+    }
+
+    private void MoveCenter(Point center)
+    {
+        zoomAnchor = center;
+        Fit();
+    }
+
+    private Point DefaultCenter()
+    {
+        var work = DisplayArea.Primary.WorkArea;
+        return new Point(work.X + work.Width / 2.0,
+            work.Y + work.Height - (voice.Height * voiceScale / 2 + 80) * Overlay.Scale(this));
+    }
+
+    private void SaveCenter(Point center) => settings.Set("general.barVisualCenter", new JsonObject
+    {
+        ["x"] = (long)Math.Round(center.X), ["y"] = (long)Math.Round(center.Y),
+    });
+
+    /// <summary>Pulls the bar back when its display was removed or its saved place is off screen.</summary>
+    public void EnsureOnScreen()
+    {
+        if (!placed) return;
+        var center = CurrentCenter();
+        var visible = ClampCenter(center);
+        if (Math.Abs(visible.X - center.X) < 1 && Math.Abs(visible.Y - center.Y) < 1) return;
+        MoveCenter(visible);
+        if (followCenter is null) SaveCenter(visible);
+    }
+
+    /// <summary>Tray command: back to the bottom center of the primary display.</summary>
+    public void ResetPosition()
+    {
+        followCenter = null;
+        homeCenter = null;
+        EnsurePlaced();
+        var center = ClampCenter(DefaultCenter());
+        MoveCenter(center);
+        SaveCenter(center);
+        settings.Set("general.barPosition", new JsonObject { ["x"] = AppWindow.Position.X, ["y"] = AppWindow.Position.Y });
+        Pin(true);
+    }
+
+    /// <summary>
+    /// Dictation started: show the visual near the bottom of the window being typed into.
+    /// The user's own place is kept and restored when the bar returns to idle.
+    /// </summary>
+    private void Follow(JsonObject? dictation)
+    {
+        if (dictation is null || !settings.Bool("dictation.followWindow") || dictation["purpose"].Str() == "note") return;
+        var frame = Overlay.FrameOf((nint)dictation["target"].Num());
+        if (frame is not { } rect) return;
+        EnsurePlaced();
+        homeCenter ??= CurrentCenter();
+        var dpi = Overlay.Scale(this);
+        // Room below the visual for two lines of text inside the window.
+        var below = (CaptionExtent * targetScale + textGap + status.FontSize * 3 + 24) * dpi;
+        var center = ClampCenter(new Point(rect.X + rect.Width / 2.0,
+            Math.Max(rect.Y + rect.Height / 2.0, rect.Y + rect.Height - below)));
+        followCenter = center;
+        MoveCenter(center);
+    }
+
+    /// <summary>Back to the user's own place once nothing is shown next to a window.</summary>
+    private void ReturnHome()
+    {
+        followCenter = null;
+        if (homeCenter is not { } home) return;
+        homeCenter = null;
+        MoveCenter(ClampCenter(home));
     }
 
     private void AutoShow()
@@ -226,8 +350,9 @@ internal sealed partial class BarWindow : Window
 
     private void HideIfDone()
     {
-        if (autoShown && !Pinned && phase == "idle" && unwritten.Length == 0 && message is null && text.Length == 0)
-            HideNow();
+        if (phase != "idle" || unwritten.Length != 0 || message is not null || text.Length != 0) return;
+        if (autoShown && !Pinned) HideNow();
+        else ReturnHome();
     }
 
     private void Place()
@@ -240,25 +365,22 @@ internal sealed partial class BarWindow : Window
             // Migrate the former tightly fitted window origin without moving its visual.
             center = new Point(pos["x"].Num() + (Math.Max(PanelWidth, voice.Width * voiceScale) / 2 + 8) * dpi,
                 pos["y"].Num() + (voice.Height * voiceScale / 2 + 8) * dpi);
-        else
-        {
-            var work = Overlay.WorkArea(this);
-            center = new Point(work.X + work.Width / 2.0, work.Y + work.Height - (voice.Height * voiceScale / 2 + 80) * dpi);
-        }
+        else center = DefaultCenter();
+        // A saved place on a display that is gone would leave the visual off screen.
+        center = ClampCenter(center);
         AppWindow.Move(new PointInt32((int)Math.Round(center.X - (body.Width / 2 + 8) * dpi),
             (int)Math.Round(center.Y - (main.Height / 2 + body.Margin.Top) * dpi)));
         // Persist the migrated center even when the user never drags or zooms.
         // A later style switch must not reinterpret the old window origin at restart.
-        settings.Set("general.barVisualCenter", new JsonObject
-        {
-            ["x"] = (long)Math.Round(center.X), ["y"] = (long)Math.Round(center.Y),
-        });
+        SaveCenter(center);
     }
 
     private void SavePosition(PointInt32 p)
     {
         var center = ScreenCenter();
         if (zoomAnimation is not null) zoomAnchor = center;
+        // Next to a window the place is temporary; only the user's own place is saved.
+        if (followCenter is not null) return;
         settings.Set("general.barPosition", new JsonObject { ["x"] = p.X, ["y"] = p.Y });
         if (center is { } value)
             settings.Set("general.barVisualCenter", new JsonObject { ["x"] = (long)Math.Round(value.X), ["y"] = (long)Math.Round(value.Y) });
@@ -443,7 +565,8 @@ internal sealed partial class BarWindow : Window
                 body.Margin.Top + main.Height + textGap + first - 32, captionPanel.ActualWidth + 64,
                 captionPanel.ActualHeight + last - first + 72);
         }
-        hitRegion.Apply(voice.IsRibbon, voice.FrameRadius, voice.HitLines,
+        // The orb uses its loudest radius, so breathing does not rebuild the region each frame.
+        hitRegion.Apply(voice.IsRibbon, VoiceVisual.MaxRadius, voice.HitLines,
             (center.X - voice.Width * scale / 2) * dpi, (center.Y - voice.Height * scale / 2) * dpi,
             scale * dpi, caption, new Rect(), dpi);
     }
@@ -471,6 +594,7 @@ internal sealed partial class BarWindow : Window
             heldReason = "";
             message = null;
             lingerTimer.Stop();
+            Follow(d);
             AutoShow();
         }
         phase = next;
