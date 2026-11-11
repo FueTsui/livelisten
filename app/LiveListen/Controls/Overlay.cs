@@ -142,17 +142,6 @@ internal static unsafe class Overlay
     public static void RaiseQuiet(Window window) =>
         SetWindowPos(Handle(window), HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
-    /// <summary>The drawn bounds of another app's window in screen pixels, without its shadow.</summary>
-    public static RectInt32? FrameOf(nint hwnd)
-    {
-        if (hwnd == 0 || !IsWindow(hwnd) || IsIconic(hwnd) || !IsWindowVisible(hwnd)) return null;
-        if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out var rect, (uint)sizeof(RECT)) != 0
-            && !GetWindowRect(hwnd, out rect)) return null;
-        var width = rect.Right - rect.Left;
-        var height = rect.Bottom - rect.Top;
-        return width > 0 && height > 0 ? new RectInt32(rect.Left, rect.Top, width, height) : null;
-    }
-
     /// <summary>Shows a window without moving it above others or taking focus.</summary>
     public static void ShowQuiet(Window window) => ShowWindow(Handle(window), SW_SHOWNOACTIVATE);
 

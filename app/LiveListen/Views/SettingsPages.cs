@@ -50,7 +50,6 @@ internal sealed partial class SettingsWindow
             ("aggressive", T("preconnect.aggressive.desc"))));
         dictationTextToggle = Toggle("dictation.showText");
         Card(T("dict.showText.title"), T("dict.showText.desc"), dictationTextToggle);
-        Card(T("dict.follow.title"), T("dict.follow.desc"), Toggle("dictation.followWindow"));
         Block(T("dict.writeMode.title"), T("dict.writeMode.desc"), Radios("dictation.writeMode",
             ("stable", T("writeMode.stable.desc")),
             ("live", T("writeMode.live.desc"))));
@@ -135,7 +134,7 @@ internal sealed partial class SettingsWindow
     {
         var version = pageVersion;
         var rows = new List<ShortcutRow>();
-        foreach (var field in new[] { "hold", "toggle", "captions", "note", "noteToggle", "noteBlank", "cards" })
+        foreach (var field in new[] { "hold", "toggle", "captions", "note", "noteToggle", "noteBlank", "cards", "showText" })
         {
             var input = new HotkeyInput(T($"key.{field}.title"), s.Str("hotkeys." + field));
             var retry = new Button { Content = T("key.retry"), Visibility = Visibility.Collapsed, Padding = new Thickness(8, 2, 8, 2), MinHeight = 24 };
@@ -667,7 +666,7 @@ internal sealed partial class SettingsWindow
     private void BuildGeneral()
     {
         Card(T("gen.startup.title"), null, Toggle("general.startWithWindows"), "");
-        Card(T("gen.update.daily"), T("gen.update.daily.desc"), Toggle("general.checkUpdatesDaily"));
+        Card(T("gen.update.daily"), null, Toggle("general.checkUpdatesDaily"));
         var proxyStatus = Note();
         proxyStatus.Visibility = Visibility.Collapsed;
         void ProxyNote(string text)
@@ -702,24 +701,7 @@ internal sealed partial class SettingsWindow
                 proxyUrl.Visibility = mode == "custom" ? Visibility.Visible : Visibility.Collapsed;
                 ProxyNote("");
             });
-        var proxyTest = new Button { Content = T("gen.proxy.test"), MinWidth = 88 };
-        proxyTest.Click += async (_, _) =>
-        {
-            var testPageVersion = pageVersion;
-            if (s.Str("general.proxyMode", "system") == "custom" && (!CommitProxyUrl() || proxyUrl.Text.Trim().Length == 0))
-            {
-                ProxyNote(T("gen.proxy.invalid"));
-                return;
-            }
-            app.ApplyProxy();
-            proxyTest.IsEnabled = false;
-            ProxyNote(T("gen.proxy.testing"));
-            var result = await UpdateService.Shared.TestConnectionAsync();
-            if (settingsClosed || pageVersion != testPageVersion) return;
-            proxyTest.IsEnabled = true;
-            ProxyNote(result.Ok ? Loc.F("gen.proxy.ok", result.Milliseconds) : T("gen.proxy.fail." + result.Error));
-        };
-        Card(T("gen.proxy.title"), T("gen.proxy.desc"), Horizontal(proxyMode, proxyUrl, proxyTest), null, out _, footer: proxyStatus);
+        Card(T("gen.proxy.title"), null, Horizontal(proxyMode, proxyUrl), null, out _, footer: proxyStatus);
         var diagStatus = Note();
         diagStatus.Visibility = Visibility.Collapsed;
         var export = ActionButton(T("gen.diag.export"), async () =>

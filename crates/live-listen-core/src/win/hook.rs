@@ -54,6 +54,7 @@ pub struct Bindings {
     pub note_toggle: Option<Binding>,
     pub note_blank: Option<Binding>,
     pub cards: Option<Binding>,
+    pub show_text: Option<Binding>,
 }
 
 impl Bindings {
@@ -67,6 +68,7 @@ impl Bindings {
             note_toggle: parse(&hotkeys.note_toggle),
             note_blank: parse(&hotkeys.note_blank),
             cards: parse(&hotkeys.cards),
+            show_text: parse(&hotkeys.show_text),
         }
     }
 
@@ -74,6 +76,7 @@ impl Bindings {
         matcher.set_bindings(self.hold, self.toggle, self.captions);
         matcher.set_notes(self.note, self.note_toggle, self.note_blank);
         matcher.cards = self.cards;
+        matcher.show_text = self.show_text;
     }
 }
 

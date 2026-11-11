@@ -366,8 +366,6 @@ struct Dictation {
     target: Option<Target>,
     /// The focused element of the target when dictation started, if UI Automation knows it.
     element: Option<Element>,
-    /// Where that element's text box was on screen at the start; the bar appears next to it.
-    anchor: Option<[i32; 4]>,
     blocked: Option<&'static str>,
     paused: bool,
     writer: Writer,
@@ -954,7 +952,15 @@ impl Core {
 
     // ----- speech providers -----
 
+    /// The service's process, using the proxy chosen in the general settings.
     fn spec_for(&self, id: &str) -> Result<ProviderSpec, String> {
+        let mut spec = self.plain_spec_for(id)?;
+        let general = &self.settings.general;
+        spec.env.extend(provider::proxy_env(&general.proxy_mode, &general.proxy_url));
+        Ok(spec)
+    }
+
+    fn plain_spec_for(&self, id: &str) -> Result<ProviderSpec, String> {
         let services = &self.settings.services;
         if id == config::DOUBAO_ID {
             return provider::doubao_spec(&services.doubao, &self.options.search).map_err(|e| e.code().to_string());
@@ -1344,7 +1350,6 @@ impl Core {
         // foreground may already have changed since the hotkey.
         let element =
             target.filter(|t| focus::foreground() == t.window).and_then(|_| self.uia.as_ref().and_then(Uia::focused));
-        let anchor = element.as_ref().and_then(Element::text_box_bounds);
         let mut blocked = None;
         match &target {
             None if purpose == Purpose::Note => {}
@@ -1413,7 +1418,6 @@ impl Core {
             phase: Phase::Connecting,
             target,
             element,
-            anchor,
             blocked,
             paused: false,
             writer: Writer::new(self.settings.dictation.write_mode),
@@ -2092,6 +2096,8 @@ impl Core {
                 let on = !self.cards_shown();
                 self.set_cards_shown(on);
             }
+            // The setting belongs to the UI's settings tree; it flips and saves it.
+            Signal::ShowText => self.emit(json!({"event": "ui.toggle", "target": "dictationText"})),
             Signal::EndedByKey { replay, .. } | Signal::EndedByClick { replay, .. } => self.stop_dictation(replay),
             Signal::EndedByTap => self.stop_dictation(false),
             Signal::Recorded(binding) => self.emit(json!({"event": "hotkey.recorded", "binding": binding})),
@@ -2113,9 +2119,6 @@ impl Core {
                 "purpose": if d.purpose == Purpose::Note { "note" } else { "type" },
                 "paused": d.paused,
                 "blocked": d.blocked,
-                // The window being typed into, so the bar can appear next to it.
-                "target": d.target.map(|t| t.window),
-                "anchor": d.anchor,
             }),
         };
         let listening = self.captions.session.is_some() || self.captions.held_for_dictation;
@@ -2711,7 +2714,6 @@ for line in sys.stdin:
             phase: Phase::Listening,
             target: None,
             element: None,
-            anchor: None,
             blocked: None,
             paused: false,
             writer: Writer::new(crate::config::WriteMode::Stable),

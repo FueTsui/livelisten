@@ -289,6 +289,9 @@ public partial class App : Application
             case "cards.changed":
                 Cards.Apply(e);
                 break;
+            case "ui.toggle":
+                if (e["target"].Str() == "dictationText") ToggleDictationText();
+                break;
             case "note.saved":
                 Bar.ShowMessage(Loc.T(e["kind"].Str() == "todo" ? "note.saved.todo" : "note.saved.note"), false);
                 break;
@@ -337,7 +340,7 @@ public partial class App : Application
         new(TrayShortcutLabel("tray.captions", "captions"), ToggleCaptions, CaptionsOn),
         new(TrayShortcutLabel("tray.note", "noteToggle"), ToggleNote),
         TrayItem.Separator,
-        new(Loc.T("tray.showDictation"), ToggleDictationText, Settings.Bool("dictation.showText")),
+        new(TrayShortcutLabel("tray.showDictation", "showText"), ToggleDictationText, Settings.Bool("dictation.showText")),
         new(TrayShortcutLabel("tray.cards", "cards"), ToggleCards, Cards.Shown),
         TrayItem.Separator,
         new(Loc.T("tray.resetBar"), () => { if (!exiting) Bar.ResetPosition(); }),

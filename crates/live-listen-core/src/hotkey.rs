@@ -289,6 +289,8 @@ pub enum Signal {
     NoteBlank,
     /// Show or hide the desktop cards.
     Cards,
+    /// Show or hide the live dictation text on the bar.
+    ShowText,
     /// Continuous dictation was ended by this key; replay it after the last text if asked.
     EndedByKey {
         replay: bool,
@@ -365,6 +367,7 @@ pub struct Matcher {
     pub note_toggle: Option<Binding>,
     pub note_blank: Option<Binding>,
     pub cards: Option<Binding>,
+    pub show_text: Option<Binding>,
     /// How long a lone modifier must be held before dictation starts.
     pub hold_delay: Duration,
     pressed: Vec<u16>,
@@ -392,6 +395,7 @@ impl Default for Matcher {
             note_toggle: None,
             note_blank: None,
             cards: None,
+            show_text: None,
             hold_delay: Duration::from_millis(250),
             pressed: Vec::new(),
             hold_state: Hold::Idle,
@@ -660,6 +664,7 @@ impl Matcher {
             (self.note_toggle, Signal::NoteToggle),
             (self.note_blank, Signal::NoteBlank),
             (self.cards, Signal::Cards),
+            (self.show_text, Signal::ShowText),
         ];
         for (binding, signal) in shortcuts {
             if let Some(b) = binding {

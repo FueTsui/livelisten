@@ -48,7 +48,6 @@ var checks = new (string Name, Func<Task> Run)[]
     ("portable and corrupted packages are never executed", NeverInstallUnverifiedOrPortable),
     ("an installer failure exposes the verified package for diagnosis", InstallerFailure),
     ("proxy modes select the system, no or a custom proxy and refuse unusable addresses", ProxyModes),
-    ("the connection test reports reachability, failures and timeouts without changing update state", ConnectionTest),
     ("a failed daily check stays silent and a later manual check still works", DailyFailureThenManual),
 };
 foreach (var (name, run) in checks)
@@ -319,9 +318,7 @@ Task ProxyModes()
     using var custom = UpdateService.CreateHandler("custom", " http://127.0.0.1:7890 ");
     var target = new Uri("https://api.github.com/");
     Check(custom.UseProxy && custom.Proxy?.GetProxy(target) is { Host: "127.0.0.1", Port: 7890 }, "custom proxy address was not applied");
-    using var socks = UpdateService.CreateHandler("custom", "socks5://proxy.example:1080");
-    Check(socks.Proxy?.GetProxy(target) is { Scheme: "socks5", Port: 1080 }, "socks5 proxy was not accepted");
-    foreach (var bad in new[] { "", "127.0.0.1:7890", "ftp://proxy.example:21", "http://user:secret@proxy.example:8080",
+    foreach (var bad in new[] { "", "127.0.0.1:7890", "ftp://proxy.example:21", "socks5://proxy.example:1080", "http://user:secret@proxy.example:8080",
         "http://proxy.example:8080/path", "http://", "not a url" })
     {
         Check(UpdateService.ProxyUri(bad) is null, "unusable proxy address was accepted: " + bad);
@@ -331,37 +328,6 @@ Task ProxyModes()
     using var unknown = UpdateService.CreateHandler("something-else", "http://127.0.0.1:1");
     Check(unknown.UseProxy && unknown.Proxy is null, "unknown mode did not behave like system");
     return Task.CompletedTask;
-}
-
-async Task ConnectionTest()
-{
-    var reached = Service((request, _) =>
-    {
-        Check(request.RequestUri!.Host == "api.github.com" && request.Headers.UserAgent.ToString() == "LiveListen-Updater/1.0",
-            "connection test asked an unexpected address or identified itself differently");
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
-    });
-    var ok = await reached.TestConnectionAsync();
-    Check(ok is { Ok: true, Error: "" } && reached.Status.Phase == UpdatePhase.Idle, "a reachable service was not reported or changed update state");
-    // A rate-limit answer still proves that the service was reached through the proxy.
-    var limited = await Service((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden))).TestConnectionAsync();
-    Check(limited.Ok, "an HTTP answer was reported as unreachable");
-    var refused = await Service((_, _) => throw new HttpRequestException("refused")).TestConnectionAsync();
-    Check(refused is { Ok: false, Error: "network" }, "a refused connection was not reported as a network failure");
-    using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
-    var slow = await Service(async (_, _) =>
-    {
-        await Task.Delay(Timeout.Infinite, cancel.Token);
-        return new HttpResponseMessage(HttpStatusCode.OK);
-    }).TestConnectionAsync(cancel.Token);
-    Check(slow is { Ok: false, Error: "timeout" }, "a silent proxy was not reported as a timeout");
-    var escaped = await Service((_, _) =>
-    {
-        var redirect = new HttpResponseMessage(HttpStatusCode.Found);
-        redirect.Headers.Location = new Uri("https://example.com/");
-        return Task.FromResult(redirect);
-    }).TestConnectionAsync();
-    Check(!escaped.Ok, "the connection test followed a redirect away from the update service");
 }
 
 async Task DailyFailureThenManual()

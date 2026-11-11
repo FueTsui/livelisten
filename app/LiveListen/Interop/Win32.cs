@@ -87,18 +87,7 @@ internal static unsafe partial class Win32
     public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
     public static readonly nint HWND_TOP = 0, HWND_TOPMOST = -1, HWND_NOTOPMOST = -2;
     public const uint WM_QUERYENDSESSION = 0x0011, WM_ENDSESSION = 0x0016, WM_DISPLAYCHANGE = 0x007E;
-    public const uint DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
-    [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool GetWindowRect(nint hwnd, out RECT rect);
-
-    [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool IsWindow(nint hwnd);
-
-    [LibraryImport("dwmapi.dll")]
-    public static partial int DwmGetWindowAttribute(nint hwnd, uint attribute, out RECT value, uint size);
     public const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4, SW_SHOW = 5, SW_RESTORE = 9;
     public const uint LWA_ALPHA = 0x2;
 

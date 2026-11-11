@@ -89,8 +89,6 @@ pub struct DictationSettings {
     pub end_action: EndAction,
     /// Show live text in the floating bar; otherwise show only the animation.
     pub show_text: bool,
-    /// Show the floating bar inside the window being typed into when dictation starts.
-    pub follow_window: bool,
     /// Font size shared by dictation text and the floating bar's status messages.
     pub font_size: f32,
     /// Input device name; empty means the system default microphone.
@@ -108,7 +106,6 @@ impl Default for DictationSettings {
             write_mode: WriteMode::Stable,
             end_action: EndAction::EndOnly,
             show_text: true,
-            follow_window: true,
             font_size: 16.0,
             microphone: String::new(),
             preconnect_level: Preconnect::Off,
@@ -162,6 +159,8 @@ pub struct HotkeySettings {
     pub note_blank: String,
     /// Show or hide the cards on the desktop.
     pub cards: String,
+    /// Show or hide the live dictation text on the bar.
+    pub show_text: String,
 }
 
 impl Default for HotkeySettings {
@@ -174,13 +173,14 @@ impl Default for HotkeySettings {
             note_toggle: "Ctrl+Alt+N".into(),
             note_blank: "Ctrl+Alt+L".into(),
             cards: "Ctrl+Alt+K".into(),
+            show_text: "Ctrl+Alt+T".into(),
         }
     }
 }
 
 impl HotkeySettings {
     /// Every shortcut field with its settings name.
-    pub fn fields(&self) -> [(&'static str, &str); 7] {
+    pub fn fields(&self) -> [(&'static str, &str); 8] {
         [
             ("hold", &self.hold),
             ("toggle", &self.toggle),
@@ -189,6 +189,7 @@ impl HotkeySettings {
             ("cards", &self.cards),
             ("noteToggle", &self.note_toggle),
             ("noteBlank", &self.note_blank),
+            ("showText", &self.show_text),
         ]
     }
 }
@@ -448,9 +449,10 @@ pub struct GeneralSettings {
     pub start_with_windows: bool,
     /// Check release metadata once a day without downloading or installing updates.
     pub check_updates_daily: bool,
-    /// Proxy for update checks and downloads: `system`, `direct` or `custom`.
+    /// Proxy for all of the app's network traffic (updates and speech services): `system`,
+    /// `direct` or `custom`.
     pub proxy_mode: String,
-    /// `http://host:port` (also `https` or `socks5`) used when the mode is `custom`.
+    /// `http://host:port` used when the mode is `custom`.
     pub proxy_url: String,
     pub bar_position: Option<Position>,
     /// Screen-space visual center for fixed-canvas scaling; old top-left remains compatible.
@@ -514,6 +516,7 @@ impl Settings {
             // Defaults for new actions must never displace an existing binding.
             ("hotkeys.noteToggle", &mut self.hotkeys.note_toggle, defaults.note_toggle),
             ("hotkeys.noteBlank", &mut self.hotkeys.note_blank, defaults.note_blank),
+            ("hotkeys.showText", &mut self.hotkeys.show_text, defaults.show_text),
         ] {
             if value.trim().is_empty() {
                 value.clear(); // An empty binding disables the shortcut.

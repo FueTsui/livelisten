@@ -85,11 +85,6 @@ internal sealed partial class BarWindow : Window
     private double layoutScale = 3;
     private double captionReserve = 240;
     private Point? zoomAnchor;
-    private Point? followCenter;
-    private Point? homeCenter;
-    private nint followTarget;
-    private bool followsBox;
-    private RectInt32 followRect;
     private bool screenActive = true;
     private Task visibilityCalls = Task.CompletedTask;
 
@@ -214,7 +209,7 @@ internal sealed partial class BarWindow : Window
     {
         EnsurePlaced();
         // A display may have gone away since the bar was last shown.
-        if (followCenter is null) EnsureOnScreen();
+        EnsureOnScreen();
         Overlay.Show(this);
         SyncVoice();
         NotifyVisibility(true);
@@ -228,7 +223,6 @@ internal sealed partial class BarWindow : Window
         voice.SetShown(false);
         Overlay.Hide(this);
         NotifyVisibility(false);
-        ReturnHome();
     }
 
     /// <summary>No animation frames while nothing can be seen: hidden, locked, or display off.</summary>
@@ -245,50 +239,6 @@ internal sealed partial class BarWindow : Window
         // Only the ribbon's outline changes the window region from frame to frame; the
         // orb's region is fixed and is set when the layout or the scale changes.
         if (voice.IsRibbon) UpdateHitRegion();
-        if (followCenter is not null) TrackTarget();
-    }
-
-    /// <summary>The window being typed into moved or was resized: stay at its bottom.</summary>
-    private void TrackTarget()
-    {
-        if (Overlay.FrameOf(followTarget) is not { } rect || rect == followRect) return;
-        // Next to a text box the bar keeps its offset from the window; otherwise it stays
-        // at the window's bottom center, also after a resize.
-        var center = followsBox && followCenter is { } old
-            ? ClampCenter(new Point(old.X + rect.X - followRect.X, old.Y + rect.Y - followRect.Y))
-            : TargetCenter(rect);
-        followRect = rect;
-        followCenter = center;
-        MoveCenter(center);
-    }
-
-    /// <summary>
-    /// Just above the text box being typed into (a chat or search box), so the live text sits
-    /// next to the caret without covering it; below the box when there is no room above.
-    /// <c>null</c> for a box that fills most of its window, such as a document.
-    /// </summary>
-    private Point? BoxCenter(JsonArray? anchor, RectInt32 window)
-    {
-        if (anchor is not { Count: 4 }) return null;
-        double left = anchor[0].Num(), top = anchor[1].Num(), right = anchor[2].Num(), bottom = anchor[3].Num();
-        if (right <= left || bottom <= top || bottom - top > window.Height * 0.4) return null;
-        if (right < window.X || left > window.X + window.Width || bottom < window.Y || top > window.Y + window.Height) return null;
-        var dpi = Overlay.Scale(this);
-        var shape = (CaptionExtent * targetScale + 8) * dpi;
-        var text = (textGap + status.FontSize * 3 + 24) * dpi;
-        var above = top - text - shape;
-        var y = above - shape >= window.Y ? above : bottom + shape;
-        followsBox = true;
-        return ClampCenter(new Point((left + right) / 2, y));
-    }
-
-    private Point TargetCenter(RectInt32 rect)
-    {
-        var dpi = Overlay.Scale(this);
-        // Room below the visual for two lines of text inside the window.
-        var below = (CaptionExtent * targetScale + textGap + status.FontSize * 3 + 24) * dpi;
-        return ClampCenter(new Point(rect.X + rect.Width / 2.0,
-            Math.Max(rect.Y + rect.Height / 2.0, rect.Y + rect.Height - below)));
     }
 
     private void EnsurePlaced()
@@ -364,49 +314,18 @@ internal sealed partial class BarWindow : Window
         var visible = ClampCenter(center);
         if (Math.Abs(visible.X - center.X) < 1 && Math.Abs(visible.Y - center.Y) < 1) return;
         MoveCenter(visible);
-        if (followCenter is null) SaveCenter(visible);
+        SaveCenter(visible);
     }
 
     /// <summary>Tray command: back to the bottom center of the primary display.</summary>
     public void ResetPosition()
     {
-        followCenter = null;
-        homeCenter = null;
         EnsurePlaced();
         var center = ClampCenter(DefaultCenter());
         MoveCenter(center);
         SaveCenter(center);
         settings.Set("general.barPosition", new JsonObject { ["x"] = AppWindow.Position.X, ["y"] = AppWindow.Position.Y });
         Pin(true);
-    }
-
-    /// <summary>
-    /// Dictation started: show the visual near the bottom of the window being typed into.
-    /// The user's own place is kept and restored when the bar returns to idle.
-    /// </summary>
-    private void Follow(JsonObject? dictation)
-    {
-        if (dictation is null || !settings.Bool("dictation.followWindow") || dictation["purpose"].Str() == "note") return;
-        var target = (nint)dictation["target"].Num();
-        if (Overlay.FrameOf(target) is not { } rect) return;
-        EnsurePlaced();
-        homeCenter ??= CurrentCenter();
-        followTarget = target;
-        followRect = rect;
-        followsBox = false;
-        var center = BoxCenter(dictation["anchor"] as JsonArray, rect) ?? TargetCenter(rect);
-        followCenter = center;
-        MoveCenter(center);
-    }
-
-    /// <summary>Back to the user's own place once nothing is shown next to a window.</summary>
-    private void ReturnHome()
-    {
-        followCenter = null;
-        followTarget = 0;
-        if (homeCenter is not { } home) return;
-        homeCenter = null;
-        MoveCenter(ClampCenter(home));
     }
 
     private void AutoShow()
@@ -416,9 +335,8 @@ internal sealed partial class BarWindow : Window
 
     private void HideIfDone()
     {
-        if (phase != "idle" || unwritten.Length != 0 || message is not null || text.Length != 0) return;
-        if (autoShown && !Pinned) HideNow();
-        else ReturnHome();
+        if (autoShown && !Pinned && phase == "idle" && unwritten.Length == 0 && message is null && text.Length == 0)
+            HideNow();
     }
 
     private void Place()
@@ -445,8 +363,6 @@ internal sealed partial class BarWindow : Window
     {
         var center = ScreenCenter();
         if (zoomAnimation is not null) zoomAnchor = center;
-        // Next to a window the place is temporary; only the user's own place is saved.
-        if (followCenter is not null) return;
         settings.Set("general.barPosition", new JsonObject { ["x"] = p.X, ["y"] = p.Y });
         if (center is { } value)
             settings.Set("general.barVisualCenter", new JsonObject { ["x"] = (long)Math.Round(value.X), ["y"] = (long)Math.Round(value.Y) });
@@ -660,7 +576,6 @@ internal sealed partial class BarWindow : Window
             heldReason = "";
             message = null;
             lingerTimer.Stop();
-            Follow(d);
             AutoShow();
         }
         phase = next;

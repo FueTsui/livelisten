@@ -95,6 +95,127 @@ fn ancestors_containing(starts: &[PathBuf], relative: &Path) -> Option<PathBuf> 
     None
 }
 
+/// Environment that makes a speech service process use the proxy chosen in the settings.
+/// The bundled bridges connect with `websocket-client` and `urllib`, which read these
+/// variables. `system` follows the manual proxy of the Windows settings (a setup script is
+/// not evaluated); without one the process keeps the environment it inherits.
+pub fn proxy_env(mode: &str, url: &str) -> Vec<(String, String)> {
+    match mode {
+        "direct" => vec![("NO_PROXY".into(), "*".into())],
+        "custom" => http_proxy(url).map(|proxy| proxy_vars(&proxy, LOCAL_BYPASS)).unwrap_or_default(),
+        _ => system_proxy().map(|(proxy, bypass)| proxy_vars(&proxy, &bypass)).unwrap_or_default(),
+    }
+}
+
+const LOCAL_BYPASS: &str = "localhost,127.0.0.1";
+
+fn proxy_vars(proxy: &str, bypass: &str) -> Vec<(String, String)> {
+    vec![
+        ("HTTP_PROXY".into(), proxy.to_string()),
+        ("HTTPS_PROXY".into(), proxy.to_string()),
+        ("NO_PROXY".into(), bypass.to_string()),
+    ]
+}
+
+/// An HTTP proxy address without credentials, or `None`.
+fn http_proxy(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let host = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let usable = !host.is_empty() && !host.contains(|c: char| c.is_whitespace() || "@/?#".contains(c));
+    usable.then(|| url.to_string())
+}
+
+/// Reads the `ProxyServer` and `ProxyOverride` values of the Windows proxy settings.
+/// `ProxyServer` is `host:port` or a list such as `http=a:1;https=b:2;socks=c:3`.
+fn parse_system_proxy(server: &str, overrides: &str) -> Option<(String, String)> {
+    let server = server.trim();
+    let address = if server.contains('=') {
+        let entry = |scheme: &str| {
+            server.split(';').find_map(|part| {
+                let (name, value) = part.trim().split_once('=')?;
+                name.trim().eq_ignore_ascii_case(scheme).then(|| value.trim().to_string())
+            })
+        };
+        entry("https").or_else(|| entry("http"))?
+    } else {
+        server.to_string()
+    };
+    let address = if address.contains("://") { address } else { format!("http://{address}") };
+    let proxy = http_proxy(&address)?;
+    let mut bypass: Vec<String> = LOCAL_BYPASS.split(',').map(str::to_string).collect();
+    for host in overrides.split(';').map(str::trim).filter(|host| !host.is_empty() && *host != "<local>") {
+        // `*.example.com` is `.example.com` for the bridges; other patterns are passed as they are.
+        let host = host.strip_prefix('*').filter(|rest| rest.starts_with('.')).unwrap_or(host).to_string();
+        if !bypass.contains(&host) {
+            bypass.push(host);
+        }
+    }
+    Some((proxy, bypass.join(",")))
+}
+
+/// The manual proxy of the current user's Windows settings, with its bypass list.
+fn system_proxy() -> Option<(String, String)> {
+    const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+    if registry_dword(KEY, "ProxyEnable")? == 0 {
+        return None;
+    }
+    parse_system_proxy(
+        &registry_string(KEY, "ProxyServer")?,
+        &registry_string(KEY, "ProxyOverride").unwrap_or_default(),
+    )
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn registry_dword(key: &str, name: &str) -> Option<u32> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::core::PCWSTR;
+    let (key, name) = (wide(key), wide(name));
+    let mut value = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: both names are NUL-terminated and the buffer is four bytes, as `size` says.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(std::ptr::from_mut(&mut value).cast()),
+            Some(&mut size),
+        )
+    };
+    result.is_ok().then_some(value)
+}
+
+fn registry_string(key: &str, name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::PCWSTR;
+    let (key, name) = (wide(key), wide(name));
+    let mut buffer = vec![0u16; 2048];
+    let mut size = (buffer.len() * 2) as u32;
+    // SAFETY: both names are NUL-terminated and `size` is the buffer's length in bytes.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+    let length = (size as usize / 2).min(buffer.len());
+    let text = String::from_utf16_lossy(&buffer[..length]);
+    Some(text.trim_end_matches('\0').to_string())
+}
+
 /// Finds an executable on PATH, skipping the Microsoft Store app-execution aliases.
 pub fn find_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -352,6 +473,12 @@ impl ProviderProcess {
     pub fn spawn(spec: &ProviderSpec, sink: OutputSink) -> io::Result<ProviderProcess> {
         let mut command = Command::new(&spec.program);
         command.args(&spec.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if spec.env.iter().any(|(k, _)| k == "NO_PROXY") {
+            // The settings decide the proxy: one inherited from the environment must not win.
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+                command.env_remove(name);
+            }
+        }
         for (k, v) in &spec.env {
             command.env(k, v);
         }
@@ -596,6 +723,29 @@ pub fn probe(spec: &ProviderSpec, timeout: Duration) -> Result<(String, Capabili
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_settings_become_the_environment_of_speech_services() {
+        assert_eq!(proxy_env("direct", "http://127.0.0.1:7890"), vec![("NO_PROXY".to_string(), "*".to_string())]);
+        let custom = proxy_env("custom", " http://127.0.0.1:7890/ ");
+        assert_eq!(custom[0], ("HTTP_PROXY".to_string(), "http://127.0.0.1:7890".to_string()));
+        assert_eq!(custom[1], ("HTTPS_PROXY".to_string(), "http://127.0.0.1:7890".to_string()));
+        assert_eq!(custom[2], ("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string()));
+        for bad in ["", "127.0.0.1:7890", "socks5://127.0.0.1:1080", "http://user:pw@host:1", "http://host:1/path"] {
+            assert!(proxy_env("custom", bad).is_empty(), "{bad}");
+        }
+        assert_eq!(
+            parse_system_proxy("127.0.0.1:7890", "<local>;*.corp.example;10.*"),
+            Some(("http://127.0.0.1:7890".into(), "localhost,127.0.0.1,.corp.example,10.*".into()))
+        );
+        assert_eq!(
+            parse_system_proxy("http=a:1;https=b:2;socks=c:3", ""),
+            Some(("http://b:2".into(), "localhost,127.0.0.1".into()))
+        );
+        assert_eq!(parse_system_proxy("http=a:1", "").unwrap().0, "http://a:1");
+        assert_eq!(parse_system_proxy("socks=c:3", ""), None, "a SOCKS-only setting cannot serve the bridges");
+        assert_eq!(parse_system_proxy("", ""), None);
+    }
 
     #[test]
     fn bundled_python_is_used_by_both_bridges_but_explicit_python_wins() {
