@@ -87,6 +87,9 @@ internal sealed partial class BarWindow : Window
     private Point? zoomAnchor;
     private Point? followCenter;
     private Point? homeCenter;
+    private nint followTarget;
+    private RectInt32 followRect;
+    private bool screenActive = true;
     private Task visibilityCalls = Task.CompletedTask;
 
     public BarWindow(App app, Func<string, bool>? copyText = null)
@@ -133,7 +136,7 @@ internal sealed partial class BarWindow : Window
         Content = root;
         Overlay.Prepare(this);
         hitRegion = new VoiceWindowRegion(Overlay.Handle(this));
-        voice.ShapeChanged += UpdateHitRegion;
+        voice.ShapeChanged += OnVoiceFrame;
         root.ContextRequested += (_, e) => { e.Handled = true; ShowContextMenu(); };
         AppWindow.Closing += (_, e) =>
         {
@@ -141,7 +144,7 @@ internal sealed partial class BarWindow : Window
         };
         AppWindow.Changed += (_, e) =>
         {
-            if (e.DidVisibilityChange) voice.SetShown(IsShown);
+            if (e.DidVisibilityChange) SyncVoice();
             if (e.DidPositionChange && placed) QueueFit();
         };
         messageTimer = Timer(() => { message = null; UpdateView(); HideIfDone(); });
@@ -200,6 +203,8 @@ internal sealed partial class BarWindow : Window
     public void Pin(bool on)
     {
         Pinned = on;
+        // The next start, also with Windows, shows the bar the way it was left.
+        settings.Set("general.barPinned", on);
         if (on) { autoShown = false; ShowNow(); }
         else HideNow();
     }
@@ -210,7 +215,7 @@ internal sealed partial class BarWindow : Window
         // A display may have gone away since the bar was last shown.
         if (followCenter is null) EnsureOnScreen();
         Overlay.Show(this);
-        voice.SetShown(true);
+        SyncVoice();
         NotifyVisibility(true);
         QueueFit();
     }
@@ -223,6 +228,42 @@ internal sealed partial class BarWindow : Window
         Overlay.Hide(this);
         NotifyVisibility(false);
         ReturnHome();
+    }
+
+    /// <summary>No animation frames while nothing can be seen: hidden, locked, or display off.</summary>
+    private void SyncVoice() => voice.SetShown(screenActive && IsShown);
+
+    public void SetScreenActive(bool active)
+    {
+        screenActive = active;
+        SyncVoice();
+    }
+
+    private void OnVoiceFrame()
+    {
+        // Only the ribbon's outline changes the window region from frame to frame; the
+        // orb's region is fixed and is set when the layout or the scale changes.
+        if (voice.IsRibbon) UpdateHitRegion();
+        if (followCenter is not null) TrackTarget();
+    }
+
+    /// <summary>The window being typed into moved or was resized: stay at its bottom.</summary>
+    private void TrackTarget()
+    {
+        if (Overlay.FrameOf(followTarget) is not { } rect || rect == followRect) return;
+        followRect = rect;
+        var center = TargetCenter(rect);
+        followCenter = center;
+        MoveCenter(center);
+    }
+
+    private Point TargetCenter(RectInt32 rect)
+    {
+        var dpi = Overlay.Scale(this);
+        // Room below the visual for two lines of text inside the window.
+        var below = (CaptionExtent * targetScale + textGap + status.FontSize * 3 + 24) * dpi;
+        return ClampCenter(new Point(rect.X + rect.Width / 2.0,
+            Math.Max(rect.Y + rect.Height / 2.0, rect.Y + rect.Height - below)));
     }
 
     private void EnsurePlaced()
@@ -321,15 +362,13 @@ internal sealed partial class BarWindow : Window
     private void Follow(JsonObject? dictation)
     {
         if (dictation is null || !settings.Bool("dictation.followWindow") || dictation["purpose"].Str() == "note") return;
-        var frame = Overlay.FrameOf((nint)dictation["target"].Num());
-        if (frame is not { } rect) return;
+        var target = (nint)dictation["target"].Num();
+        if (Overlay.FrameOf(target) is not { } rect) return;
         EnsurePlaced();
         homeCenter ??= CurrentCenter();
-        var dpi = Overlay.Scale(this);
-        // Room below the visual for two lines of text inside the window.
-        var below = (CaptionExtent * targetScale + textGap + status.FontSize * 3 + 24) * dpi;
-        var center = ClampCenter(new Point(rect.X + rect.Width / 2.0,
-            Math.Max(rect.Y + rect.Height / 2.0, rect.Y + rect.Height - below)));
+        followTarget = target;
+        followRect = rect;
+        var center = TargetCenter(rect);
         followCenter = center;
         MoveCenter(center);
     }
@@ -338,6 +377,7 @@ internal sealed partial class BarWindow : Window
     private void ReturnHome()
     {
         followCenter = null;
+        followTarget = 0;
         if (homeCenter is not { } home) return;
         homeCenter = null;
         MoveCenter(ClampCenter(home));

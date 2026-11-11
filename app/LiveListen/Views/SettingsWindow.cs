@@ -145,6 +145,9 @@ internal sealed partial class SettingsWindow : Window
     /// <summary>False while the reused window is hidden; messages then belong on the bar.</summary>
     public bool IsOpen => !settingsClosed;
 
+    /// <summary>Raised after the window was hidden; the app frees it when it stays unused.</summary>
+    public event Action? Hidden;
+
     private void OnNavigationChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs e)
     {
         if (e.SelectedItem is NavigationViewItem { Tag: string tag }) ShowPage(tag);
@@ -202,6 +205,7 @@ internal sealed partial class SettingsWindow : Window
             notebook = null;
             banner.IsOpen = false;
             settingsSaveFailureShown = false;
+            Hidden?.Invoke();
         }
         return true;
     }
@@ -322,6 +326,7 @@ internal sealed partial class SettingsWindow : Window
         if (settingsClosed || serviceDialog is not null || applying || current == "notebook" || path.StartsWith("general.barPosition", StringComparison.Ordinal)
             || path.StartsWith("general.barVisualCenter", StringComparison.Ordinal)
             || path.StartsWith("general.captionsPosition", StringComparison.Ordinal)
+            || path.StartsWith("general.barPinned", StringComparison.Ordinal)
             || path.StartsWith("general.closeHintShown", StringComparison.Ordinal))
         {
             return;

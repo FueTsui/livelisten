@@ -167,6 +167,9 @@ internal sealed partial class CardWindow : Window
         if (card["x"] is JsonNode x && card["y"] is JsonNode y)
         {
             Overlay.PlaceAt(this, (int)x.Num(), (int)y.Num());
+            // A saved place outside the screen was moved in; do not land on another card.
+            var moved = AppWindow.Position;
+            if (moved.X != (int)x.Num() || moved.Y != (int)y.Num()) AvoidOtherCards();
         }
         else
         {
@@ -181,6 +184,22 @@ internal sealed partial class CardWindow : Window
         }
         Overlay.ShowQuiet(this);
         QueueFit();
+    }
+
+    private void AvoidOtherCards()
+    {
+        var others = app.Cards.CardRects(Id);
+        var step = (int)(36 * Overlay.Scale(this));
+        for (var tries = 0; tries < 12; tries++)
+        {
+            var mine = CardRect;
+            if (!others.Any(o => o.X < mine.X + mine.Width && mine.X < o.X + o.Width
+                && o.Y < mine.Y + mine.Height && mine.Y < o.Y + o.Height)) return;
+            var before = AppWindow.Position;
+            Overlay.PlaceAt(this, before.X, before.Y + step);
+            if (AppWindow.Position.Y == before.Y) Overlay.PlaceAt(this, before.X - step, before.Y);
+            if (AppWindow.Position == before) return;
+        }
     }
 
     public void ShowExisting()
@@ -602,6 +621,36 @@ internal sealed class CardsHost(App app)
         }
         if (Shown && !flushing && e["editCard"]?.GetValue<ulong>() is { } idToEdit
             && windows.TryGetValue(idToEdit, out var newCard)) newCard.EditNewCard();
+        ScheduleRelease();
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? releaseTimer;
+
+    /// <summary>
+    /// Hidden windows are kept so that showing them again is immediate. When they stay hidden
+    /// for ten minutes, their windows are closed; the cards themselves are untouched.
+    /// </summary>
+    private void ScheduleRelease()
+    {
+        if (releaseTimer is null)
+        {
+            releaseTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+            releaseTimer.Interval = TimeSpan.FromMinutes(10);
+            releaseTimer.IsRepeating = false;
+            releaseTimer.Tick += (_, _) => ReleaseHidden();
+        }
+        releaseTimer.Stop();
+        if (windows.Values.Any(window => !window.IsCardVisible)) releaseTimer.Start();
+    }
+
+    private void ReleaseHidden()
+    {
+        if (app.Exiting || flushing) return;
+        foreach (var (id, window) in windows.ToArray())
+        {
+            if (window.IsCardVisible || closingCards.Contains(id) || deletingCards.Contains(id)) continue;
+            if (window.CloseCard()) windows.Remove(id);
+        }
     }
 
     public void CreateDesktopCard()

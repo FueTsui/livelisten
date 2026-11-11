@@ -43,6 +43,14 @@ internal sealed unsafe class TrayIcon : IDisposable
     /// <summary>The display layout or resolution changed.</summary>
     public event Action? DisplayChanged;
 
+    /// <summary>False while the session is locked or the display is off: nothing can be seen.</summary>
+    public event Action<bool>? ScreenActiveChanged;
+
+    private bool locked;
+    private bool displayOff;
+    private nint powerNotification;
+    private bool sessionNotification;
+
     /// <summary>Builds the menu each time it opens, so checks are current.</summary>
     public Func<IReadOnlyList<TrayItem>>? Menu { get; set; }
 
@@ -75,6 +83,18 @@ internal sealed unsafe class TrayIcon : IDisposable
         {
         }
         Add();
+        sessionNotification = WTSRegisterSessionNotification(hwnd, 0);
+        var displayState = new Guid("6fe69556-704a-47a0-8f24-c28d936fda47"); // GUID_CONSOLE_DISPLAY_STATE
+        powerNotification = RegisterPowerSettingNotification(hwnd, ref displayState, 0);
+    }
+
+    private void SetScreen(bool? nowLocked, bool? nowOff)
+    {
+        var before = !locked && !displayOff;
+        locked = nowLocked ?? locked;
+        displayOff = nowOff ?? displayOff;
+        var after = !locked && !displayOff;
+        if (before != after) dispatcher.TryEnqueue(() => { if (!disposed) ScreenActiveChanged?.Invoke(after); });
     }
 
     public void SetTip(string text)
@@ -237,6 +257,19 @@ internal sealed unsafe class TrayIcon : IDisposable
             SessionEnding?.Invoke();
             return false;
         }
+        if (msg == 0x02B1) // WM_WTSSESSION_CHANGE
+        {
+            if (wParam == 7) SetScreen(true, null); // WTS_SESSION_LOCK
+            else if (wParam == 8) SetScreen(false, null); // WTS_SESSION_UNLOCK
+            return false;
+        }
+        if (msg == 0x0218 && wParam == 0x8013 && lParam != 0) // WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE
+        {
+            // POWERBROADCAST_SETTING: GUID, DataLength, Data. 0 = display off, 1 = on, 2 = dimmed.
+            var length = *(uint*)(lParam + 16);
+            if (length >= 4) SetScreen(null, *(uint*)(lParam + 20) == 0);
+            return false;
+        }
         if (msg == WM_DISPLAYCHANGE)
         {
             dispatcher.TryEnqueue(() => { if (!disposed) DisplayChanged?.Invoke(); });
@@ -279,6 +312,8 @@ internal sealed unsafe class TrayIcon : IDisposable
     public void Dispose()
     {
         disposed = true;
+        if (sessionNotification) WTSUnRegisterSessionNotification(hwnd);
+        if (powerNotification != 0) UnregisterPowerSettingNotification(powerNotification);
         if (added)
         {
             var data = Data(0);
@@ -297,4 +332,19 @@ internal sealed unsafe class TrayIcon : IDisposable
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EndMenu();
+
+    [DllImport("wtsapi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSRegisterSessionNotification(nint hwnd, uint flags);
+
+    [DllImport("wtsapi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSUnRegisterSessionNotification(nint hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern nint RegisterPowerSettingNotification(nint recipient, ref Guid setting, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnregisterPowerSettingNotification(nint handle);
 }

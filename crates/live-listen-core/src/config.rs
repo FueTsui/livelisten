@@ -452,6 +452,8 @@ pub struct GeneralSettings {
     /// Screen-space visual center for fixed-canvas scaling; old top-left remains compatible.
     pub bar_visual_center: Option<Position>,
     pub captions_position: Option<Position>,
+    /// Whether the bar stayed on screen when the app last ran; `None` before the first choice.
+    pub bar_pinned: Option<bool>,
     pub close_hint_shown: bool,
 }
 
@@ -463,6 +465,7 @@ impl Default for GeneralSettings {
             bar_position: None,
             bar_visual_center: None,
             captions_position: None,
+            bar_pinned: None,
             close_hint_shown: false,
         }
     }

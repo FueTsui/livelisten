@@ -143,6 +143,7 @@ public partial class App : Application
         tray.Clicked += ToggleBar;
         tray.Menu = BuildMenu;
         tray.SessionEnding += OnSessionEnding;
+        tray.ScreenActiveChanged += active => { if (!exiting) Bar.SetScreenActive(active); };
         tray.DisplayChanged += () =>
         {
             if (exiting) return;
@@ -154,7 +155,8 @@ public partial class App : Application
         Cards = new CardsHost(this);
         Cards.Load();
         if (requestedVoiceStyle is not null) Settings.Set("appearance.voiceStyle", requestedVoiceStyle);
-        if (!background)
+        // Started by the user: always show the bar. Started with Windows: the way it was left.
+        if (!background || Settings.Bool("general.barPinned"))
         {
             Bar.Pin(true);
         }
@@ -407,12 +409,36 @@ public partial class App : Application
     internal void OpenSettings(string? page = null)
     {
         if (exiting) return;
+        settingsRelease?.Stop();
         if (settingsWindow is null)
         {
-            settingsWindow = new SettingsWindow(this);
-            settingsWindow.Closed += (_, _) => settingsWindow = null;
+            var window = settingsWindow = new SettingsWindow(this);
+            window.Closed += (_, _) => { if (ReferenceEquals(settingsWindow, window)) settingsWindow = null; };
+            window.Hidden += () =>
+            {
+                // Reopening soon reuses the window; after a long pause its memory is returned.
+                settingsRelease ??= ReleaseTimer(() =>
+                {
+                    if (exiting || settingsWindow is not { IsOpen: false } idle) return;
+                    settingsWindow = null;
+                    idle.CloseHost();
+                });
+                settingsRelease.Stop();
+                settingsRelease.Start();
+            };
         }
         settingsWindow.Open(page);
+    }
+
+    private DispatcherQueueTimer? settingsRelease;
+
+    private DispatcherQueueTimer ReleaseTimer(Action tick)
+    {
+        var timer = dispatcher.CreateTimer();
+        timer.Interval = TimeSpan.FromMinutes(10);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => tick();
+        return timer;
     }
 
     private static string UpdatesDirectory => Path.Combine(EngineHost.TestConfigDir ?? Path.Combine(
@@ -513,6 +539,7 @@ public partial class App : Application
             overlayMenu?.Dispose();
             Bar.Close();
             updateTimer?.Stop();
+            settingsRelease?.Stop();
             tray?.Dispose();
             Exit();
         }
