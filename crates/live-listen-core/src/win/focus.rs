@@ -218,6 +218,17 @@ pub struct Uia(IUIAutomation);
 pub struct Element(IUIAutomationElement);
 
 impl Element {
+    /// Screen rectangle `[left, top, right, bottom]` of a text box, for placing the bar next
+    /// to where the user types. `None` for stand-in elements and empty rectangles.
+    pub fn text_box_bounds(&self) -> Option<[i32; 4]> {
+        if !self.is_text_field() {
+            return None;
+        }
+        // SAFETY: a property read on a valid COM interface owned by this thread.
+        let rect = unsafe { self.0.CurrentBoundingRectangle() }.ok()?;
+        (rect.right > rect.left && rect.bottom > rect.top).then_some([rect.left, rect.top, rect.right, rect.bottom])
+    }
+
     /// Text boxes and documents. Anything else (a window or pane) stands in for the real
     /// control while the app is still building its accessibility tree, as browsers do.
     fn is_text_field(&self) -> bool {

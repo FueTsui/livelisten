@@ -88,6 +88,7 @@ internal sealed partial class BarWindow : Window
     private Point? followCenter;
     private Point? homeCenter;
     private nint followTarget;
+    private bool followsBox;
     private RectInt32 followRect;
     private bool screenActive = true;
     private Task visibilityCalls = Task.CompletedTask;
@@ -251,10 +252,34 @@ internal sealed partial class BarWindow : Window
     private void TrackTarget()
     {
         if (Overlay.FrameOf(followTarget) is not { } rect || rect == followRect) return;
+        // Next to a text box the bar keeps its offset from the window; otherwise it stays
+        // at the window's bottom center, also after a resize.
+        var center = followsBox && followCenter is { } old
+            ? ClampCenter(new Point(old.X + rect.X - followRect.X, old.Y + rect.Y - followRect.Y))
+            : TargetCenter(rect);
         followRect = rect;
-        var center = TargetCenter(rect);
         followCenter = center;
         MoveCenter(center);
+    }
+
+    /// <summary>
+    /// Just above the text box being typed into (a chat or search box), so the live text sits
+    /// next to the caret without covering it; below the box when there is no room above.
+    /// <c>null</c> for a box that fills most of its window, such as a document.
+    /// </summary>
+    private Point? BoxCenter(JsonArray? anchor, RectInt32 window)
+    {
+        if (anchor is not { Count: 4 }) return null;
+        double left = anchor[0].Num(), top = anchor[1].Num(), right = anchor[2].Num(), bottom = anchor[3].Num();
+        if (right <= left || bottom <= top || bottom - top > window.Height * 0.4) return null;
+        if (right < window.X || left > window.X + window.Width || bottom < window.Y || top > window.Y + window.Height) return null;
+        var dpi = Overlay.Scale(this);
+        var shape = (CaptionExtent * targetScale + 8) * dpi;
+        var text = (textGap + status.FontSize * 3 + 24) * dpi;
+        var above = top - text - shape;
+        var y = above - shape >= window.Y ? above : bottom + shape;
+        followsBox = true;
+        return ClampCenter(new Point((left + right) / 2, y));
     }
 
     private Point TargetCenter(RectInt32 rect)
@@ -368,7 +393,8 @@ internal sealed partial class BarWindow : Window
         homeCenter ??= CurrentCenter();
         followTarget = target;
         followRect = rect;
-        var center = TargetCenter(rect);
+        followsBox = false;
+        var center = BoxCenter(dictation["anchor"] as JsonArray, rect) ?? TargetCenter(rect);
         followCenter = center;
         MoveCenter(center);
     }

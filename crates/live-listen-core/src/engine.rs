@@ -366,6 +366,8 @@ struct Dictation {
     target: Option<Target>,
     /// The focused element of the target when dictation started, if UI Automation knows it.
     element: Option<Element>,
+    /// Where that element's text box was on screen at the start; the bar appears next to it.
+    anchor: Option<[i32; 4]>,
     blocked: Option<&'static str>,
     paused: bool,
     writer: Writer,
@@ -1342,6 +1344,7 @@ impl Core {
         // foreground may already have changed since the hotkey.
         let element =
             target.filter(|t| focus::foreground() == t.window).and_then(|_| self.uia.as_ref().and_then(Uia::focused));
+        let anchor = element.as_ref().and_then(Element::text_box_bounds);
         let mut blocked = None;
         match &target {
             None if purpose == Purpose::Note => {}
@@ -1410,6 +1413,7 @@ impl Core {
             phase: Phase::Connecting,
             target,
             element,
+            anchor,
             blocked,
             paused: false,
             writer: Writer::new(self.settings.dictation.write_mode),
@@ -2111,6 +2115,7 @@ impl Core {
                 "blocked": d.blocked,
                 // The window being typed into, so the bar can appear next to it.
                 "target": d.target.map(|t| t.window),
+                "anchor": d.anchor,
             }),
         };
         let listening = self.captions.session.is_some() || self.captions.held_for_dictation;
@@ -2706,6 +2711,7 @@ for line in sys.stdin:
             phase: Phase::Listening,
             target: None,
             element: None,
+            anchor: None,
             blocked: None,
             paused: false,
             writer: Writer::new(crate::config::WriteMode::Stable),
