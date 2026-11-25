@@ -1,10 +1,12 @@
 # 构建与发布验证
 
+状态：current · 适用版本：0.1.5 · 核对日期：2026-11-25
+
 正式版本和下载文件见 [GitHub Releases](https://github.com/FueTsui/livelisten/releases)。打包脚本只构建本地文件。
 
 ## 构建
 
-需要Rust/MSVC、.NET 10 SDK、Python 3.11+、PowerShell。版本均为 0.1.4；下载输入固定在 `scripts/release-dependencies.json`，按Python.org/PyPI元数据校验SHA256，不复制本机site-packages。
+需要Rust/MSVC、.NET 10 SDK、Python 3.11+、PowerShell。版本均为 0.1.5；下载输入固定在 `scripts/release-dependencies.json`，按Python.org/PyPI元数据校验SHA256，不复制本机site-packages。
 
 ```powershell
 .\scripts\package-portable.ps1

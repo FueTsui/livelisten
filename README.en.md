@@ -39,7 +39,7 @@ Download `LiveListen-Setup-<version>-x64.exe` and `SHA256SUMS.txt` from [GitHub 
 1. Compare the following SHA-256 value with the matching entry in `SHA256SUMS.txt`.
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.4-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.5-x64.exe -Algorithm SHA256
    ```
 
 2. Run the installer and choose **Install now**. The default path is `%LOCALAPPDATA%\Programs\LiveListen`. Custom options let you change the folder, shortcuts, startup, and whether to launch after installation.
@@ -115,7 +115,7 @@ The WinUI app calls the Rust core through a JSON C ABI. The core also powers the
 | Settings | `settings.get`, `settings.set` | `config` (read only) | Reads or writes local settings |
 | Dictation | `dictation.start/toggle/stop/cancel` | — | Sends audio and types into the target |
 | Captions | `captions.toggle/set/lines` | — | Sends audio to the speech provider |
-| Desktop cards | `cards.list/add/update/styles.clear/show/delete` | — | Writes local card data. Deletion is permanent. |
+| Desktop cards | `cards.list/add/update/styles.clear/show/delete` | `cards-add` | Writes local card data. Deletion is permanent. |
 | Credentials | `secret.set/delete/status` | — | Uses Windows Credential Manager |
 | Diagnostics | `diagnostics.export` | — | Writes a local file |
 
@@ -144,6 +144,7 @@ Run these commands from the installation directory.
 .\live-listen.exe check --provider doubao
 .\live-listen.exe listen --wav .\sample.wav --json
 .\live-listen.exe config
+.\live-listen.exe cards-add --kind todo --date 2026-12-06 --text "Prepare event materials" --json
 ```
 
 | Option | Behavior |
@@ -152,6 +153,8 @@ Run these commands from the installation directory.
 | `listen` | Accepts `--source mic\|system\|mixed`, `--device NAME`, `--wav PATH` (16 kHz mono PCM16), `--seconds N` (default 10), and `--provider ID`. |
 | Exit codes | 0 for success, 1 for a runtime error, 2 for invalid arguments. |
 | Timeouts | `check` waits up to 20 seconds for startup. After audio ends, `listen` waits up to eight more seconds for the final result. |
+
+`cards-add` sends the request to the running Windows desktop app in the same user session and returns the card ID. Cards appear immediately when desktop display is enabled.
 
 The `listen` command sends audio to the selected provider. For installer and uninstaller flags, see the [installation guide](docs/INSTALLATION.md).
 

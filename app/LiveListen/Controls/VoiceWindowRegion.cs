@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using LiveListen.Interop;
+using LiveListen.Services;
 using Windows.Foundation;
 
 namespace LiveListen.Controls;
@@ -13,10 +14,10 @@ internal sealed class VoiceWindowRegion(nint hwnd)
 {
     private readonly POINT[][] polygons = Enumerable.Range(0, 4).Select(_ => new POINT[(VoiceVisual.Segments + 1) * 2]).ToArray();
     private readonly int[] ellipse = new int[4];
-    private readonly int[][] captions = [new int[4], new int[4]];
+    private readonly int[] captionBounds = new int[4];
     private int? previousHash;
 
-    public void Apply(bool ribbon, double radius, Point[][] lines, double x, double y, double scale, Rect status, Rect text, double dpi)
+    public void Apply(bool ribbon, Rect halo, Point[][] lines, double x, double y, double scale, Rect caption, double dpi)
     {
         var hash = ribbon ? 1 : 0;
         void Add(int value) => hash = unchecked(hash * 31 + value);
@@ -28,24 +29,18 @@ internal sealed class VoiceWindowRegion(nint hwnd)
                 {
                     var p = lines[layer][i];
                     // Includes local line bloom and cubic interpolation between samples.
-                    Set(polygons[layer], i, x + p.X * scale, y + (p.Y - 6) * scale);
-                    Set(polygons[layer], (VoiceVisual.Segments + 1) * 2 - 1 - i, x + p.X * scale, y + (p.Y + 6) * scale);
+                    Set(polygons[layer], i, x + p.X * scale, y + (p.Y - VoiceSizing.RibbonHitHalfWidth) * scale);
+                    Set(polygons[layer], (VoiceVisual.Segments + 1) * 2 - 1 - i, x + p.X * scale, y + (p.Y + VoiceSizing.RibbonHitHalfWidth) * scale);
                 }
                 foreach (var p in polygons[layer]) { Add(p.X); Add(p.Y); }
             }
-            // GDI's integer ellipse is slightly inset from XAML's antialiased
-            // ellipse. Keep one physical pixel of room for the feathered edge.
-            SetRect(ellipse, new Rect(x - 1, y - 1, 232 * scale + 2, 48 * scale + 2), 1);
         }
-        else
-        {
-            var extent = radius * VoiceVisual.HaloRadius + 1;
-            SetRect(ellipse, new Rect(x + (VoiceVisual.OrbCenter - extent) * scale, y + (VoiceVisual.OrbCenter - extent) * scale, 2 * extent * scale, 2 * extent * scale), 1);
-        }
+        // Keep one physical pixel for XAML's antialiased edge.
+        SetRect(ellipse, new Rect(x + halo.X * scale - 1, y + halo.Y * scale - 1,
+            halo.Width * scale + 2, halo.Height * scale + 2), 1);
         foreach (var value in ellipse) Add(value);
-        SetRect(captions[0], status, dpi);
-        SetRect(captions[1], text, dpi);
-        foreach (var rect in captions) foreach (var value in rect) Add(value);
+        SetRect(captionBounds, caption, dpi);
+        foreach (var value in captionBounds) Add(value);
         if (previousHash == hash) return;
 
         var region = CreateRectRgn(0, 0, 0, 0);
@@ -58,8 +53,8 @@ internal sealed class VoiceWindowRegion(nint hwnd)
                     if (!Union(region, CreatePolygonRgn(polygon, polygon.Length, 1))) return;
             }
             if (!Union(region, CreateEllipticRgn(ellipse[0], ellipse[1], ellipse[2], ellipse[3]))) return;
-            foreach (var rect in captions)
-                if (rect[2] > rect[0] && rect[3] > rect[1] && !Union(region, CreateRectRgn(rect[0], rect[1], rect[2], rect[3]))) return;
+            if (captionBounds[2] > captionBounds[0] && captionBounds[3] > captionBounds[1] &&
+                !Union(region, CreateRectRgn(captionBounds[0], captionBounds[1], captionBounds[2], captionBounds[3]))) return;
             if (SetWindowRgn(hwnd, region, false) != 0)
             {
                 region = 0; // Ownership transfers to Windows only on success.
@@ -74,6 +69,11 @@ internal sealed class VoiceWindowRegion(nint hwnd)
 
     private static void SetRect(int[] values, Rect rect, double scale)
     {
+        if (rect.Width <= 0 || rect.Height <= 0)
+        {
+            Array.Clear(values);
+            return;
+        }
         values[0] = (int)Math.Floor(rect.X * scale);
         values[1] = (int)Math.Floor(rect.Y * scale);
         values[2] = (int)Math.Ceiling(rect.Right * scale);

@@ -1,4 +1,4 @@
-//! `live-listen` command line: devices, speech services and a one-shot listen test.
+//! `live-listen` command line for audio, speech services and desktop cards.
 //!
 //! Exit codes: 0 success, 1 runtime failure, 2 usage error.
 
@@ -15,6 +15,8 @@ use live_listen_core::provider::{self, ProviderOutput, ProviderProcess, Provider
 use live_listen_core::{dictation, engine, secrets};
 use serde_json::{Value, json};
 
+mod card_command;
+
 const USAGE: &str = "\
 Usage: live-listen <command> [options]
 
@@ -29,6 +31,8 @@ Commands:
       --seconds N                 Listen time for devices (default 10)
       --provider ID               Speech service (default: from settings)
   config                      Show the settings file location and contents
+  cards-add --kind note|todo [--date YYYY-MM-DD] (--text TEXT | --stdin)
+                              Add a card to the running desktop app
 
 Options for all commands:
   --config DIR    Settings folder (default %APPDATA%\\LiveListen)
@@ -83,6 +87,7 @@ struct Args {
     wav: Option<PathBuf>,
     seconds: Option<f64>,
     provider: Option<String>,
+    card: card_command::Options,
 }
 
 enum Failure {
@@ -100,6 +105,7 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, Failure> {
         wav: None,
         seconds: None,
         provider: None,
+        card: card_command::Options::default(),
     };
     let need = |name: &str, v: Option<String>| v.ok_or_else(|| Failure::Usage(format!("{name} needs a value")));
     while let Some(arg) = raw.next() {
@@ -110,6 +116,10 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, Failure> {
             "--device" => args.device = Some(need("--device", raw.next())?),
             "--wav" => args.wav = Some(PathBuf::from(need("--wav", raw.next())?)),
             "--provider" => args.provider = Some(need("--provider", raw.next())?),
+            "--kind" => args.card.kind = Some(need("--kind", raw.next())?),
+            "--date" => args.card.date = Some(need("--date", raw.next())?),
+            "--text" => args.card.text = Some(need("--text", raw.next())?),
+            "--stdin" => args.card.stdin = true,
             "--seconds" => {
                 let v = need("--seconds", raw.next())?;
                 let n: f64 = v.parse().map_err(|_| Failure::Usage(format!("bad --seconds value: {v}")))?;
@@ -124,6 +134,9 @@ fn parse(mut raw: impl Iterator<Item = String>) -> Result<Args, Failure> {
             other if args.command.is_empty() => args.command = other.to_string(),
             other => return Err(Failure::Usage(format!("unexpected argument: {other}"))),
         }
+    }
+    if args.card.used() && !matches!(args.command.as_str(), "cards-add" | "help" | "version") {
+        return Err(Failure::Usage("card options are only valid for cards-add".into()));
     }
     Ok(args)
 }
@@ -411,6 +424,7 @@ fn main() -> ExitCode {
         }
         "check" => check(&args),
         "listen" => listen(&args),
+        "cards-add" => card_command::run(&args),
         "config" => {
             show_config(&args);
             Ok(())
@@ -453,6 +467,19 @@ mod tests {
         assert!(matches!(args(&["listen", "--seconds", "0"]), Err(Failure::Usage(_))));
         assert!(matches!(args(&["listen", "--bogus"]), Err(Failure::Usage(_))));
         assert!(matches!(args(&["listen", "extra", "more"]), Err(Failure::Usage(_))));
+    }
+
+    #[test]
+    fn parses_card_options_without_affecting_other_commands() {
+        let a = args(&["cards-add", "--kind", "todo", "--date", "2026-12-06", "--text", "参加活动", "--json"])
+            .ok()
+            .unwrap();
+        assert_eq!(a.command, "cards-add");
+        assert_eq!(a.card.kind.as_deref(), Some("todo"));
+        assert_eq!(a.card.date.as_deref(), Some("2026-12-06"));
+        assert_eq!(a.card.text.as_deref(), Some("参加活动"));
+        assert!(a.json);
+        assert!(matches!(args(&["config", "--stdin"]), Err(Failure::Usage(_))));
     }
 
     #[test]

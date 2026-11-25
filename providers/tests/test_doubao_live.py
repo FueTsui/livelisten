@@ -220,6 +220,53 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(got[5]['text'], '你好，世界。')
         self.assertEqual(got[6], {'type': 'end', 'id': 7, 'cancelled': False})
 
+    def test_two_pass_results_replace_the_same_span_and_keep_spoken_repetition(self):
+        phrase = "打开设置页面"
+
+        def detailed(text, *, interim, start, end, streaming=False):
+            extra = {'is_stream_result': True} if streaming else {'nonstream_end_time': 100005}
+            return {'text': text, 'is_interim': interim, 'start_time': start, 'end_time': end, 'extra': extra}
+
+        def two_pass(module, blocks, cancelled, preview, on_connected, on_final):
+            list(blocks)
+            ends = []
+            frames = [
+                ({'text': phrase, 'is_interim': True}, detailed(
+                    phrase, interim=True, start=0, end=1.5, streaming=True)),
+                ({'text': phrase, 'is_interim': True}, detailed(
+                    phrase, interim=False, start=0, end=2.2, streaming=True)),
+                ({'text': phrase, 'is_interim': True}, detailed(
+                    phrase, interim=False, start=0, end=2.2)),
+                ({'text': phrase + '。', 'is_interim': False}, detailed(
+                    phrase + '。', interim=False, start=0, end=2.2)),
+                ({'text': phrase, 'is_interim': True}, detailed(
+                    phrase, interim=True, start=3.1, end=4.6, streaming=True)),
+                ({'text': phrase + '。', 'is_interim': False}, detailed(
+                    phrase + '。', interim=False, start=3.1, end=5.3)),
+                ({'text': '临时文字', 'is_interim': True}, detailed(
+                    '临时文字', interim=True, start=5.4, end=5.9, streaming=True)),
+            ]
+            # Mirror the vendored reader: it appends every non-interim row and calls
+            # the preview once for each row. The bridge must reconcile the source frames.
+            for rows in frames:
+                module.decode_response(response(*rows))
+                for row in rows:
+                    if not row['is_interim']:
+                        ends.append(row['text'])
+                        preview(''.join(ends))
+                    else:
+                        preview(''.join(ends) + row['text'])
+            on_final(''.join(ends))
+
+        lines = [json.dumps({'type': 'start', 'id': 7}), audio(7), json.dumps({'type': 'stop', 'id': 7})]
+        got, _ = self.run_lines(two_pass, lines, 8)
+        previews = [(m['text'], m['stable']) for m in got if m['type'] == 'text']
+        last = phrase + '。'
+        self.assertEqual(previews, [
+            (phrase, 0), (last, 0), (last + phrase, 0), (last + last, 0), (last + last + '临时文字', 0),
+        ])
+        self.assertEqual([m['text'] for m in got if m['type'] == 'final'], [last + last])
+
     def test_cancel_before_audio_ends_cancelled(self):
         lines = [json.dumps({'type': 'start', 'id': 1}), json.dumps({'type': 'cancel', 'id': 1})]
         got, _ = self.run_lines(streaming, lines, 2)
@@ -326,7 +373,7 @@ class BridgeTests(unittest.TestCase):
 
 class TrackerTests(unittest.TestCase):
     def test_counts_only_final_results(self):
-        tracker = doubao_live.StableTracker()
+        tracker = doubao_live.TranscriptTracker()
         tracker.observe(response({'text': '一二', 'is_interim': True}))
         tracker.observe(response({'text': '一二三', 'is_interim': False}, {'text': '四', 'is_interim': True}))
         tracker.observe({'event': 'TaskStarted'})

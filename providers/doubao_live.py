@@ -49,14 +49,13 @@ class Output:
                 pass  # The app went away; the input loop ends on EOF.
 
 
-class StableTracker:
-    """Counts characters the service has finalized, per recognition stream.
+class TranscriptTracker:
+    """Reconciles source results on each recognition stream's reader thread.
 
-    Doubao marks each result as interim or final. The module reports only joined preview
-    text, so finals are counted by observing decoded responses before the module handles
-    them. The module decodes a stream's responses and calls its preview on one thread (its
-    reader, new for every stream), so a thread-local count keeps parallel sessions apart.
-    Python string length equals the Unicode scalar count the protocol uses.
+    Timed rows contain successive versions of a segment. Untimed rows paired
+    with them are summaries of the same audio. The vendored reader appends
+    every non-interim row, so use our segment snapshot for timed responses.
+    Entirely untimed streams retain the older finalized-prefix behavior.
     """
 
     def __init__(self):
@@ -64,6 +63,16 @@ class StableTracker:
 
     def reset(self):
         self._local.chars = 0
+        self._local.segments = None
+
+    def timed_text(self):
+        segments = getattr(self._local, 'segments', None)
+        if segments is None:
+            return None
+        ordered = [segments[start] for start in sorted(segments)]
+        preview = ''.join(text for _, text in ordered)
+        final = ''.join(text for priority, text in ordered if priority > 0)
+        return preview, final
 
     @property
     def chars(self):
@@ -74,13 +83,32 @@ class StableTracker:
             return
         payload = event.get('payload', '{}')
         data = json.loads(payload) if isinstance(payload, str) else payload
-        added = 0
-        for item in (data or {}).get('results', []):
-            text = item.get('text') if isinstance(item, dict) else None
-            if isinstance(text, str) and item.get('is_interim') is False:
-                added += len(text)
-        if added:
-            self._local.chars = self.chars + added
+        rows = [row for row in (data or {}).get('results', [])
+                if isinstance(row, dict) and isinstance(row.get('text'), str)]
+        timed = []
+        for row in rows:
+            start, end = row.get('start_time'), row.get('end_time')
+            interim = row.get('is_interim')
+            if (type(start) not in (int, float) or type(end) not in (int, float)
+                    or not 0 <= start < end < float('inf') or not isinstance(interim, bool)):
+                continue
+            extra = row.get('extra')
+            streaming = isinstance(extra, dict) and extra.get('is_stream_result') is True
+            # A second-pass result can replace a streaming final and be revised
+            # again for punctuation before the session really ends.
+            priority = 0 if interim else 1 if streaming else 2
+            timed.append((start, priority, row['text']))
+
+        segments = getattr(self._local, 'segments', None)
+        if timed:
+            if segments is None:
+                segments = self._local.segments = {}
+            for start, priority, text in timed:
+                previous = segments.get(start)
+                if text and (previous is None or priority >= previous[0]):
+                    segments[start] = (priority, text)
+        elif segments is None:
+            self._local.chars = self.chars + sum(len(row['text']) for row in rows if row.get('is_interim') is False)
 
 
 def tap(module, tracker):
@@ -184,7 +212,7 @@ class Bridge:
     def __init__(self, doubao, output):
         self.doubao = doubao
         self.out = output
-        self.tracker = StableTracker()
+        self.tracker = TranscriptTracker()
         tap(doubao, self.tracker)
         self.warmup = doubao.ConnectionWarmup()
         self.order = SessionOrder(output)
@@ -275,10 +303,24 @@ class Bridge:
             send(type='end', cancelled=True, last=True)
             return
         self.tracker.reset()
+        timed_final = None
+        previous_preview = None
 
         def preview(text):
-            if isinstance(text, str) and not session.cancelled.is_set():
-                send(type='text', text=text, stable=min(self.tracker.chars, len(text)))
+            nonlocal timed_final, previous_preview
+            if not isinstance(text, str) or session.cancelled.is_set():
+                return
+            snapshot = self.tracker.timed_text()
+            if snapshot is not None:
+                text, timed_final = snapshot
+                # These rows can still be amended. The real session final makes
+                # them safe for the engine's append-only stable writer.
+                stable = 0
+            else:
+                stable = min(self.tracker.chars, len(text))
+            if (text, stable) != previous_preview:
+                previous_preview = (text, stable)
+                send(type='text', text=text, stable=stable)
 
         def on_connected():
             if not session.cancelled.is_set():
@@ -286,6 +328,9 @@ class Bridge:
 
         def on_final(text):
             if not session.cancelled.is_set():
+                # ASREnded is queued by the reader after all preceding previews.
+                if timed_final is not None:
+                    text = timed_final
                 send(type='final', text=text if isinstance(text, str) else '')
 
         try:

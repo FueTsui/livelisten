@@ -15,6 +15,24 @@ use crate::paths::write_atomic;
 mod markdown;
 
 const MAX_TEXT: usize = 4000;
+const YEAR_2000: u64 = 946_684_800_000;
+const YEAR_2100: u64 = 4_102_444_800_000;
+
+pub(crate) fn card_date(ms: Option<&Value>) -> Result<Option<u64>, &'static str> {
+    ms.filter(|value| !value.is_null())
+        .map(|value| value.as_u64().filter(|ms| (YEAR_2000..YEAR_2100).contains(ms)).ok_or("bad_date"))
+        .transpose()
+}
+
+pub(crate) fn validate_new_text(text: &str) -> Result<(), &'static str> {
+    if text.trim().is_empty() {
+        return Err("empty_card");
+    }
+    if text.trim().chars().count() > MAX_TEXT {
+        return Err("text_too_long");
+    }
+    Ok(())
+}
 const MAX_RTF_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,8 +250,6 @@ impl CardBook {
     /// to follow the shared card style again) from `patch`. `rtf` requires its matching
     /// `text`; a plain-text edit clears old formatting. Nothing changes on an error.
     pub fn update(&mut self, id: u64, patch: &Value) -> Result<(), &'static str> {
-        const YEAR_2000: u64 = 946_684_800_000;
-        const YEAR_2100: u64 = 4_102_444_800_000;
         let rtf = match patch.get("rtf") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -259,11 +275,7 @@ impl CardBook {
         let card = self.cards.iter_mut().find(|c| c.id == id).ok_or("unknown_card")?;
         // Validate every fallible field before applying any part of the patch.
         // A rejected edit must not silently change the in-memory book.
-        let created_ms = patch
-            .get("createdMs")
-            .filter(|v| !v.is_null())
-            .map(|v| v.as_u64().filter(|ms| (YEAR_2000..YEAR_2100).contains(ms)).ok_or("bad_date"))
-            .transpose()?;
+        let created_ms = card_date(patch.get("createdMs"))?;
         let kind = patch["kind"]
             .as_str()
             .map(|kind| match kind {

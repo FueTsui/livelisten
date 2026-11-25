@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Core;
-use crate::cards::{CardBook, CardKind};
+use crate::cards::{CardBook, CardKind, card_date, validate_new_text};
 use crate::paths;
 
 /// How often a failed card save is retried.
@@ -164,8 +164,15 @@ impl Core {
         self.emit(event);
     }
 
-    pub(super) fn add_card(&mut self, kind: CardKind, text: &str, edit_on_desktop: bool) -> Result<u64, String> {
-        let id = self.notes.cards.add(kind, text, paths::timestamp(), paths::unix_ms());
+    pub(super) fn add_card(
+        &mut self,
+        kind: CardKind,
+        text: &str,
+        edit_on_desktop: bool,
+        created_ms: Option<u64>,
+    ) -> Result<u64, String> {
+        let ms = created_ms.unwrap_or_else(paths::unix_ms);
+        let id = self.notes.cards.add(kind, text, paths::iso_from_ms(ms), ms);
         self.notes.markdown_dirty = true;
         if edit_on_desktop {
             self.notes.cards.show_on_desktop = true;
@@ -238,7 +245,14 @@ impl Core {
             "cards.add" => {
                 let kind = if text_of(request, "kind") == "todo" { CardKind::Todo } else { CardKind::Note };
                 let edit_on_desktop = request["editOnDesktop"].as_bool().unwrap_or(false);
-                self.add_card(kind, text_of(request, "text"), edit_on_desktop).map(|id| json!({"id": id}))
+                let text = text_of(request, "text");
+                let created_ms = card_date(request.get("createdMs"));
+                let text_check =
+                    if request["strictText"].as_bool() == Some(true) { validate_new_text(text) } else { Ok(()) };
+                created_ms
+                    .and_then(|ms| text_check.map(|()| ms))
+                    .map_err(err)
+                    .and_then(|ms| self.add_card(kind, text, edit_on_desktop, ms).map(|id| json!({"id": id})))
             }
             "cards.update" => match id_of(request, "id") {
                 Ok(card) => {
@@ -355,6 +369,50 @@ mod tests {
         let change = events.iter().rfind(|e| e["event"] == "cards.changed").unwrap();
         assert_eq!(change["editCard"], card.id);
         assert_eq!(change["showOnDesktop"], true);
+        drop(core);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dated_add_checks_before_saving_and_publishes_the_final_card() {
+        let dir = temp_dir("dated-add");
+        let (mut core, events, _rx) = core(&dir);
+        let ms = 1_800_000_000_000_u64;
+        for (text, created_ms, error) in [("", ms, "empty_card"), ("dated todo", 1, "bad_date")] {
+            let result = core.notes_call(
+                "cards.add",
+                &json!({
+                    "kind": "todo", "text": text, "strictText": true, "createdMs": created_ms,
+                }),
+            );
+            assert_eq!(result, Some(Err(error.to_string())));
+        }
+        assert!(core.notes.cards.cards.is_empty());
+        assert!(!dir.join("cards.json").exists());
+        assert!(events.lock().unwrap().iter().all(|event| event["event"] != "cards.changed"));
+
+        let result = core
+            .notes_call(
+                "cards.add",
+                &json!({
+                    "kind": "todo", "text": "dated todo", "strictText": true, "createdMs": ms,
+                }),
+            )
+            .unwrap()
+            .unwrap();
+        let book = CardBook::load(&dir.join("cards.json"));
+        assert_eq!(book.cards.len(), 1);
+        let card = &book.cards[0];
+        assert_eq!(result["id"], card.id);
+        assert_eq!(card.created_ms, ms);
+        assert_eq!(card.created, paths::iso_from_ms(ms));
+        assert_eq!(card.kind, CardKind::Todo);
+        assert!(card.visible && book.show_on_desktop);
+        let events = events.lock().unwrap();
+        let mut changes = events.iter().filter(|event| event["event"] == "cards.changed");
+        assert_eq!(changes.next().unwrap()["cards"][0]["createdMs"], ms);
+        assert!(changes.next().is_none(), "no intermediate card with another date");
+        drop(events);
         drop(core);
         let _ = std::fs::remove_dir_all(dir);
     }

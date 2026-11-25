@@ -21,9 +21,8 @@ internal sealed class VoiceVisual : Canvas
     internal const int Segments = 32;
     internal const double OrbCenter = 116;
     internal const double OrbUnit = 34.0 / 59;
-    internal const double HaloRadius = 2.4;
-    /// <summary>Radius of the loudest frame; a fixed bound for the window region.</summary>
-    internal const double MaxRadius = (59 + 5 + 18) * OrbUnit;
+    private const double OrbRestRadius = 34;
+    private const double RibbonCenterY = 24;
     private const double RibbonReferenceWidth = 664;
     private readonly VoiceMotion motion = new();
     private readonly DispatcherQueueTimer timer;
@@ -52,7 +51,10 @@ internal sealed class VoiceVisual : Canvas
 
     public event Action? ShapeChanged;
     public bool IsRibbon => ribbon;
-    public double FrameRadius { get; private set; } = 35;
+    private double frameRadius = OrbRestRadius;
+    public Rect HaloBounds => ribbon
+        ? CenteredEllipse(OrbCenter, RibbonCenterY, VoiceSizing.RibbonHaloWidth, VoiceSizing.RibbonHaloHeight)
+        : CenteredEllipse(OrbCenter, OrbCenter, HaloDiameter(frameRadius), HaloDiameter(frameRadius));
     public Point[][] HitLines { get; } = Enumerable.Range(0, 4).Select(_ => new Point[Segments + 1]).ToArray();
 
     public VoiceVisual()
@@ -63,7 +65,6 @@ internal sealed class VoiceVisual : Canvas
         Children.Add(halo);
         Children.Add(contours);
         contours.RenderTransform = rotation;
-        PrepareEllipse(halo, haloScale, OrbCenter, OrbCenter, 34 * HaloRadius * 2, 34 * HaloRadius * 2);
         PrepareEllipse(core, coreScale, OrbCenter, OrbCenter, 34 * 0.93 * 2, 34 * 0.93 * 2);
         PrepareEllipse(liquid, liquidScale, OrbCenter, OrbCenter, VoiceLiquid.Diameter, VoiceLiquid.Diameter);
         // A quiet coloured volume supports the flowing liquid instead of a white
@@ -112,8 +113,10 @@ internal sealed class VoiceVisual : Canvas
         Height = contours.Height = ribbon ? 48 : 232;
         motion.Animations = animations;
         core.Visibility = liquid.Visibility = ribbon ? Visibility.Collapsed : Visibility.Visible;
-        PrepareEllipse(halo, haloScale, 116, ribbon ? 24 : OrbCenter,
-            ribbon ? 232 : 34 * HaloRadius * 2, ribbon ? 48 : 34 * HaloRadius * 2);
+        var haloSize = HaloBounds;
+        var restDiameter = HaloDiameter(OrbRestRadius);
+        PrepareEllipse(halo, haloScale, OrbCenter, ribbon ? RibbonCenterY : OrbCenter,
+            ribbon ? haloSize.Width : restDiameter, ribbon ? haloSize.Height : restDiameter);
         halo.Fill = ribbon ? ribbonHalo : orbHalo;
         foreach (var figure in figures) figure.IsClosed = !ribbon;
         var cyan = dark ? "#FFA2E9FA" : "#FF308CB5";
@@ -131,7 +134,7 @@ internal sealed class VoiceVisual : Canvas
             var path = outlines[layer];
             path.Stroke = stroke;
             path.Visibility = ribbon && layer == 4 ? Visibility.Collapsed : Visibility.Visible;
-            path.StrokeThickness = layer == 5 ? (ribbon ? 5 : 7)
+            path.StrokeThickness = layer == 5 ? (ribbon ? VoiceSizing.RibbonBloomThickness : 7)
                 : ribbon ? (layer == 3 ? 1.5 : 1)
                 : (layer == 4 ? 1.6 : 3) * OrbUnit;
             path.Opacity = layer == 5 ? 0.07 : ribbon ? 0.35 + layer * 0.18 : 0.15 + layer * 0.13;
@@ -177,7 +180,7 @@ internal sealed class VoiceVisual : Canvas
         var level = motion.Animations ? motion.Level : 0;
         var breath = Math.Sin(t * 1.4) * 0.5 + 0.5;
         var radius = (59 + breath * 5 + level * 18) * OrbUnit;
-        FrameRadius = radius;
+        frameRadius = radius;
         rotation.Angle = ribbon ? 0 : t * (motion.Processing ? 0.30 : 0.07) * 180 / Math.PI;
         if (ribbon)
         {
@@ -185,13 +188,12 @@ internal sealed class VoiceVisual : Canvas
         }
         else
         {
-            // Full 2.4 R halo fits the canvas even at the loudest frame. Transforms
-            // preserve text size and avoid measuring the window on animation ticks.
-            haloScale.ScaleX = haloScale.ScaleY = radius / 34;
+            // Scale the painted halo and its reported bounds from the same frame.
+            haloScale.ScaleX = haloScale.ScaleY = radius / OrbRestRadius;
             coreScale.ScaleX = coreScale.ScaleY = radius / 34;
             liquidScale.ScaleX = liquidScale.ScaleY = radius / 34;
             liquid.Draw(t, level, motion.Phase == "listening");
-            var inner = 10 * OrbUnit / (radius * HaloRadius);
+            var inner = 10 * OrbUnit / (radius * VoiceSizing.OrbHaloRatio);
             orbHalo.GradientStops[1].Offset = inner;
             orbHalo.GradientStops[2].Offset = inner + 0.45 * (1 - inner);
         }
@@ -210,7 +212,7 @@ internal sealed class VoiceVisual : Canvas
                     var unit = 232 / RibbonReferenceWidth;
                     var envelope = Math.Pow(Math.Max(0, Math.Sin(Math.Clamp(u, 0, 1) * Math.PI)), 1.8);
                     var wave = Math.Sin(sourceX * 0.032 - t * 2 + contour * 0.8) * Math.Sin(sourceX * 0.014 + t * 0.6);
-                    points[i + 1] = new Point(sourceX * unit, 24 + wave * (2 + breath * 2 + level * 24) * envelope * unit);
+                    points[i + 1] = new Point(sourceX * unit, RibbonCenterY + wave * (2 + breath * 2 + level * 24) * envelope * unit);
                 }
                 else
                 {
@@ -236,6 +238,11 @@ internal sealed class VoiceVisual : Canvas
         }
         ShapeChanged?.Invoke();
     }
+
+    private static double HaloDiameter(double radius) => 2 * radius * VoiceSizing.OrbHaloRatio;
+
+    private static Rect CenteredEllipse(double x, double y, double width, double height) =>
+        new(x - width / 2, y - height / 2, width, height);
 
     private static void PrepareEllipse(FrameworkElement element, ScaleTransform scale, double x, double y, double width, double height)
     {

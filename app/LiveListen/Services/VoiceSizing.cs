@@ -8,6 +8,11 @@ internal static class VoiceSizing
     public const double RibbonMaximum = 3;
     public const double RibbonDefault = 1.5;
     public const double Speed = 0.5;
+    public const double OrbHaloRatio = 1.38;
+    public const double RibbonHaloWidth = 184;
+    public const double RibbonHaloHeight = 24;
+    public const double RibbonBloomThickness = 5;
+    public const double RibbonHitHalfWidth = RibbonBloomThickness / 2 + 1;
 
     public static double Clamp(double value, bool ribbon = false) => double.IsFinite(value)
         ? Math.Clamp(value, ribbon ? RibbonMinimum : Minimum, ribbon ? RibbonMaximum : Maximum)

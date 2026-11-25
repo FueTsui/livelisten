@@ -234,12 +234,7 @@ internal sealed partial class BarWindow : Window
         SyncVoice();
     }
 
-    private void OnVoiceFrame()
-    {
-        // Only the ribbon's outline changes the window region from frame to frame; the
-        // orb's region is fixed and is set when the layout or the scale changes.
-        if (voice.IsRibbon) UpdateHitRegion();
-    }
+    private void OnVoiceFrame() => UpdateHitRegion();
 
     private void EnsurePlaced()
     {
@@ -547,10 +542,9 @@ internal sealed partial class BarWindow : Window
                 body.Margin.Top + main.Height + textGap + first - 32, captionPanel.ActualWidth + 64,
                 captionPanel.ActualHeight + last - first + 72);
         }
-        // The orb uses its loudest radius, so breathing does not rebuild the region each frame.
-        hitRegion.Apply(voice.IsRibbon, VoiceVisual.MaxRadius, voice.HitLines,
+        hitRegion.Apply(voice.IsRibbon, voice.HaloBounds, voice.HitLines,
             (center.X - voice.Width * scale / 2) * dpi, (center.Y - voice.Height * scale / 2) * dpi,
-            scale * dpi, caption, new Rect(), dpi);
+            scale * dpi, caption, dpi);
     }
 
     private void ShowContextMenu()

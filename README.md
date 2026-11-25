@@ -8,7 +8,7 @@
 
 说话即写入当前输入框；电脑里播放的声音实时变成字幕；一句话记成桌面卡片。
 
-![Version](https://img.shields.io/badge/version-0.1.4-blue)
+![Version](https://img.shields.io/badge/version-0.1.5-blue)
 [![GitHub Release](https://img.shields.io/github/v/release/FueTsui/livelisten)](https://github.com/FueTsui/livelisten/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)
@@ -26,7 +26,7 @@
 - **听写**：按住右 <kbd>Ctrl</kbd> 说话、松开结束，文字写入当前输入框；也可切换为持续听写。可选稳定写入或实时修正，结束时可附带回车等按键。
 - **实时字幕**：音源可选电脑声音、麦克风或两者混合；字号、宽度和外观可调，修改即时生效。
 - **随手记与待办**：一句话记成桌面卡片，卡片可编辑、完成、归档、改日期，并可单独设置外观。
-- **语音浮条**：星云与星河两种透明语音动效，可拖动、从中心缩放；靠近屏幕底部时文字自动移到上方。
+- **语音浮条**：星云与星河两种透明语音动效，本体可拖动和滚轮缩放，轮廓外的点击直接交给下方窗口。靠近屏幕底部时文字自动移到上方。
 - **提前连接**：可选关闭、均衡、积极三档，在后台准备好识别连接，让第一个字更快出现。
 - **多种识别服务**：内置豆包兼容通道（免配置），以及豆包、OpenAI、千问、腾讯官方接口（使用自己的凭据）。
 - **写入保护**：密码框禁止听写；输入目标切换或无法写入时暂停，未写入的文字转到剪贴板，并明确提示成功或失败。
@@ -48,7 +48,7 @@
 1. **先核对校验值**：
 
    ```powershell
-   Get-FileHash .\LiveListen-Setup-0.1.4-x64.exe -Algorithm SHA256
+   Get-FileHash .\LiveListen-Setup-0.1.5-x64.exe -Algorithm SHA256
    ```
 
    结果应与 `SHA256SUMS.txt` 中对应行一致；不一致时不要运行。
@@ -138,7 +138,7 @@
 | 听写 | `dictation.start/toggle/stop/cancel` | — | — | 音频外发、写入目标输入框 |
 | 字幕 | `captions.toggle/set/lines` | — | — | 音频外发 |
 | 语音随手记 | `note.toggle` | — | — | 音频外发、本地写入卡片 |
-| 卡片 | `cards.list/add/update/styles.clear/show/delete` | — | — | 本地写入；删除不可恢复 |
+| 卡片 | `cards.list/add/update/styles.clear/show/delete` | `cards-add` | — | 本地写入；删除不可恢复 |
 | 凭据 | `secret.set/delete/status` | — | — | 写入 Windows 凭据管理器 |
 | 诊断 | `diagnostics.export` | — | — | 本地文件写入 |
 
@@ -157,7 +157,7 @@ const char *ll_version(void);
 
 - 请求形如 `{"cmd":"providers"}`；成功回复带 `"ok":true`，失败为 `{"ok":false,"error":"<错误码>"}`。
 - `ll_start` 失败时返回 NULL。事件在引擎线程上回调，回调应尽快返回并复制字符串。
-- `cards.add` 可传入 `"editOnDesktop":true`，显示桌面卡片并在 `cards.changed` 事件中返回待编辑的 `editCard`。
+- `cards.add` 接收 `kind`（`note` 或 `todo`）、`text` 和可选 `createdMs`（Unix 毫秒）。传入 `strictText:true` 会拒绝空白或超长正文。`editOnDesktop:true` 显示桌面卡片，并在 `cards.changed` 事件中返回待编辑的 `editCard`。
 - 文本协议见 [识别桥接协议](docs/PROVIDER_PROTOCOL.md)。
 
 ### CLI
@@ -170,16 +170,20 @@ live-listen providers
 live-listen check --provider doubao
 live-listen listen --wav .\sample.wav --json
 live-listen config
+live-listen cards-add --kind todo --date 2026-12-06 --text "准备活动物料" --json
 ```
 
 | 项目 | 说明 |
 | --- | --- |
 | 通用选项 | `--config DIR` 指定设置目录（默认 `%APPDATA%\LiveListen`）；`--json` 每行输出一个 ASCII 转义的 JSON 对象；`--version` |
 | `listen` 选项 | `--source mic\|system\|mixed`、`--device NAME`、`--wav PATH`（16 kHz 单声道 PCM16）、`--seconds N`（默认 10）、`--provider ID` |
-| 退出码 | 0 成功；1 运行失败（设备、服务或识别错误）；2 参数错误 |
+| `cards-add` 选项 | `--kind note\|todo`，任选 `--text TEXT` 或 `--stdin`（UTF-8），可选 `--date YYYY-MM-DD`（指定日期时使用 Windows 本地中午，省略时使用当前时间） |
+| 退出码 | 0 成功；1 运行失败；2 参数错误 |
 | 超时 | `check` 等待服务启动最多 20 秒；`listen` 在录音或 WAV 结束后最多再等 8 秒最终结果 |
 
 `listen` 会打开音频设备并把音频发给识别服务，不是离线检查。
+
+`cards-add` 需要同一 Windows 用户和会话中运行支持该入口的桌面程序。使用 `--config` 时必须与运行实例的配置目录一致。新增完成后返回卡片编号，开启「在桌面显示」时立即刷新。若提示保存待重试、Markdown 导出失败或结果未知，先查看应用中的待办，避免重复新增。
 
 ### 安装程序
 

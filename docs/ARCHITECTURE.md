@@ -1,5 +1,7 @@
 # 架构说明：实时聆听
 
+状态：current · 适用工作版：0.1.5 · 源码核对：2026-11-25
+
 ## 组成
 
 ```
@@ -12,14 +14,14 @@ LiveListen.exe（C# WinUI 3，界面外壳）
        ├─ 随手记卡片：%APPDATA%\LiveListen\cards.json
        └─ 识别服务进程（每个音频通道一个，JSON 行协议，stdin/stdout）
             └─ python -B providers\doubao_live.py → doubao_asr → 豆包服务器
-live-listen.exe（Rust CLI，调试与命令行识别，与界面共用核心）
+live-listen.exe（Rust CLI，调试与命令行识别；新增卡片经本地管道交给桌面实例）
 ```
 
 | 模块 | 位置 | 职责 |
 | --- | --- | --- |
 | 核心 | `crates/live-listen-core` | 全部业务逻辑：设置、音频、听写规划、字幕分句、快捷键匹配、服务进程管理、密钥存取；`cards`（随手记卡片及其单独外观）、`engine/notes`（卡片的命令和事件） |
 | C 接口 | `crates/live-listen-ffi` | `ll_start`、`ll_call`、`ll_free`、`ll_destroy`、`ll_version`；只做 JSON 转换 |
-| CLI | `crates/live-listen-cli` | `devices`、`providers`、`check`、`listen`、`config` |
+| CLI | `crates/live-listen-cli` | `devices`、`providers`、`check`、`listen`、`config`、`cards-add` |
 | 界面 | `app/LiveListen` | 浮条、字幕、设置窗口（含「随手记」页）、桌面卡片、托盘；不含业务规则 |
 | 豆包桥接 | `providers/doubao_live.py` | 把协议消息转成 `doubao_asr` 的流式调用；不修改 `doubao_asr` |
 | 安装程序 | `setup` | `setup.exe` 兼任安装与卸载程序（egui 界面）；`pack.exe` 把程序目录压缩后追加到安装程序后面。产品信息来自 `setup/install-manifest.json`；不链接核心，不读写设置内容 |
@@ -64,6 +66,8 @@ live-listen.exe（Rust CLI，调试与命令行识别，与界面共用核心）
 2. 结束后，按开头的提示词归为待办或随手记，存入 `cards.json`，桌面显示新卡片。新建空白卡片不启动识别；`cards.add` 的可选字段 `editOnDesktop` 会显示桌面卡片，并用 `cards.changed` 的 `editCard` 指定需要打开编辑器的新卡片。
 3. 卡片同时存储权威纯文本 `text` 与可选 `rtf`。富文本编辑成对提交，旧客户端仅修改纯文本时清除旧格式；元数据修改保留格式。RTF 有大小、结构与嵌入内容限制，界面加载时核对纯文本一致性。
 4. `cards/markdown.rs` 将卡片投影为配置目录内“随手记/状态/YYYY-MM-DD.md”，使用 Windows 本地日期、生成标记与正文校验和。先原子写入新日期记录，再清理过时的程序生成文件；同名用户文件或手改记录不覆盖。Markdown 错误单独标记、定时重试，不将已持久化的 JSON 误报为未保存。
+
+5. `cards-add` 通过按 Windows 会话和配置目录区分的本地命名管道传入卡片正文、类型和可选日期。桌面实例校验请求后调用现有的 `cards.add`，引擎在一次保存中写入日期、更新 Markdown，并以 `cards.changed` 通知窗口。客户端校验管道所有者，服务端 ACL 仅允许当前用户本地访问。结果未知的请求不会自动重发。
 
 ### 听写与字幕同时开启
 

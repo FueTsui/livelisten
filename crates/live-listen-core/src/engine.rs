@@ -2090,7 +2090,7 @@ impl Core {
             }
             Signal::NoteToggle => self.toggle_note(),
             Signal::NoteBlank => {
-                let _ = self.add_card(CardKind::Note, "", true);
+                let _ = self.add_card(CardKind::Note, "", true, None);
             }
             Signal::Cards => {
                 let on = !self.cards_shown();
@@ -2278,6 +2278,8 @@ impl Core {
                 json!({"id": id, "running": slot.process.is_some(), "capabilities": self.caps.get(id)}),
             );
             map.insert("configDir".into(), json!(self.dirs.config));
+            #[cfg(windows)]
+            map.insert("cardsPipe".into(), json!(crate::win::cards_pipe::name(&self.dirs.config).ok()));
             map.insert("logFile".into(), json!(self.dirs.log_file()));
         }
         value

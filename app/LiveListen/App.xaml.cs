@@ -19,6 +19,7 @@ public partial class App : Application
     private CaptionsWindow? captions;
     private SettingsWindow? settingsWindow;
     private volatile bool exiting;
+    private readonly CancellationTokenSource cardCommandStop = new();
     private DispatcherQueueTimer? updateTimer;
     private int exitVersion;
     private long stateVersion;
@@ -154,6 +155,7 @@ public partial class App : Application
         Bar = new BarWindow(this);
         Cards = new CardsHost(this);
         Cards.Load();
+        if (status["cardsPipe"].Str() is { Length: > 0 } pipe) _ = ListenForCardCommandsAsync(pipe);
         if (requestedVoiceStyle is not null) Settings.Set("appearance.voiceStyle", requestedVoiceStyle);
         // Started by the user: always show the bar. Started with Windows: the way it was left.
         if (!background || Settings.Bool("general.barPinned"))
@@ -173,6 +175,21 @@ public partial class App : Application
         RemoveOldUpdatePackages();
     }
 
+    private async Task ListenForCardCommandsAsync(string pipe)
+    {
+        try
+        {
+            await Task.Run(() => CardCommandServer.RunAsync(pipe, request => exiting
+                ? Task.FromResult(CardCommandServer.Error("stopped"))
+                : Engine.CallAsync("cards.add", request), cardCommandStop.Token));
+        }
+        catch (Exception error)
+        {
+            // A transport setup failure must not interfere with desktop card editing.
+            LogUi(error);
+        }
+    }
+
     /// <summary>
     /// Windows ends the process as soon as this returns, without the orderly exit: commit
     /// card drafts and settings and let the core write everything, all on this thread.
@@ -181,6 +198,7 @@ public partial class App : Application
     {
         if (exiting) return;
         exiting = true;
+        cardCommandStop.Cancel();
         try
         {
             Cards?.CommitDrafts();
@@ -542,6 +560,7 @@ public partial class App : Application
                 CancelExit(Loc.Error(shutdown["error"].Str("card_save_failed")));
                 return;
             }
+            cardCommandStop.Cancel();
             settingsWindow?.CloseHost();
             Cards?.CloseAll();
             captions?.Close();
